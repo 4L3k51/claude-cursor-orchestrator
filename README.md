@@ -1,228 +1,148 @@
-# AI Coding Orchestrator
+# Claude × Cursor Orchestrator
 
-Coordinates **Claude Code** (planner/verifier) and **Cursor Agent** (implementer) to autonomously build projects while capturing every interaction in Supabase for analysis.
+Observation framework that coordinates **Claude Code** (planner/verifier) and **Cursor Agent** (implementer) to build apps while logging every token, tool call, and web search to **Supabase**.
 
-## Architecture
+## How It Works
 
 ```
-You (single prompt)
-  │
-  ▼
-┌─────────────────────────────────────────────┐
-│           Python Orchestrator               │
-│  (subprocess management + raw log capture)  │
-└──────────┬──────────────────┬───────────────┘
-           │                  │
-     ┌─────▼─────┐     ┌─────▼─────┐
-     │ Claude Code│     │  Cursor   │
-     │    CLI     │     │ Agent CLI │
-     │ (plan +    │     │(implement)│
-     │  verify)   │     │           │
-     └─────┬─────┘     └─────┬─────┘
-           │                  │
-     ┌─────▼──────────────────▼─────┐
-     │   Shared project directory    │
-     │   + Supabase log storage      │
-     └──────────────────────────────┘
+You: "Build a Supabase todo app with auth"
+                    │
+                    ▼
+        ┌───────────────────────┐
+        │  Python Orchestrator  │
+        └───────┬───────┬───────┘
+                │       │
+      ┌─────────▼─┐   ┌─▼──────────┐
+      │Claude Code │   │  Cursor    │
+      │  Plans &   │──▶│  Agent     │
+      │  Verifies  │◀──│ Implements │
+      └─────────┬──┘   └──┬────────┘
+                │          │
+        ┌───────▼──────────▼───────┐
+        │   Supabase (JSONB logs)  │
+        │   Every event captured   │
+        └──────────────────────────┘
 ```
 
-**Flow for each step:**
-1. **Claude Code** generates the plan (broken into steps)
-2. **Cursor Agent** implements each step (`--force` mode, auto-applies changes)
-3. **Claude Code** verifies the implementation (inspects actual files, runs checks)
-4. If verification fails → retry with enriched prompt (up to N retries)
-5. Everything is logged: every token, tool call, file write, error, timing
+**One prompt in → fully built project + complete observation dataset out.**
 
-## Prerequisites
+For each step, the orchestrator runs:
 
-```bash
-# Claude Code CLI
-npm install -g @anthropic-ai/claude-code
+1. **Plan** — Claude Code generates a step-by-step implementation plan
+2. **Implement** — Cursor Agent builds each step (`--force` auto-applies changes)
+3. **Review** — Claude Code reads the actual project files and verifies Cursor's work is correct
+4. **Retry or Proceed** — If Claude Code says FAIL → Cursor retries with the issues appended. If PASS → next step
+5. **Log** — Every token, tool call, file write, bash command, web search, and error → Supabase
 
-# Cursor Agent CLI
-curl https://cursor.com/install -fsSL | bash
+Claude Code acts as the reviewer of Cursor Agent's implementation at every step. If Cursor makes a mistake, Claude Code catches it and the orchestrator sends Cursor back with specific feedback until the step passes.
 
-# Authenticate both
-claude          # Follow browser auth flow
-agent           # Follow auth flow
+## What Gets Logged
 
-# Python dependencies
-pip install -r requirements.txt
-```
+Everything is stored as JSONB in Supabase, queryable with SQL:
+
+- Tool calls (`shellToolCall`, `editToolCall`, `readToolCall`, `WebSearch`, `WebFetch`)
+- File diffs (full before/after content for every edit)
+- Bash output (stdout, stderr, exit codes, execution time)
+- Claude Code's review verdicts (PASS/FAIL with reasoning)
+- Token usage (input/output tokens, cache hits, model used)
+- Errors and retries
+- Timing per step, per phase, per API call
 
 ## Quick Start
 
-### 1. Set up Supabase
+### 1. Install CLIs
 
-1. Create a Supabase project at [supabase.com](https://supabase.com)
-2. Go to SQL Editor and run the contents of `migration.sql`
-3. Get your project URL and **service role key** (not anon key) from Settings > API
-4. Create a `.env` file:
+```bash
+# Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Cursor Agent
+curl https://cursor.com/install -fsSL | bash
+agent login
+```
+
+### 2. Install Python dependencies
+
+```bash
+pip install python-dotenv supabase
+```
+
+### 3. Set up Supabase
+
+- Create a project at [supabase.com](https://supabase.com)
+- Run `migration.sql` in the SQL Editor
+- Copy your project URL and **service_role** key
+
+### 4. Configure environment
 
 ```bash
 cp .env.example .env
-# Edit .env with your credentials
+# Edit .env with your Supabase credentials
 ```
 
-Or export environment variables:
-```bash
-export SUPABASE_URL="https://your-project.supabase.co"
-export SUPABASE_KEY="your-service-role-key"
-```
-
-### 2. Verify setup
+### 5. Preflight check
 
 ```bash
 python preflight.py
 ```
 
-### 3. Run it
+### 6. Run
 
 ```bash
-python orchestrator.py "Build a Supabase todo app with user auth, RLS policies, and a Next.js frontend"
+# Simple test
+python orchestrator.py "Create a simple Node.js hello world project"
+
+# Real build
+python orchestrator.py "Build a Supabase todo app with email auth, RLS policies per user, and a React frontend"
 ```
 
-### 4. Analyze what happened
-
-```bash
-python analyzer.py <run_id>
-```
-
-## Usage
-
-### Running the orchestrator
-
-```bash
-# Basic usage
-python orchestrator.py "Build a Supabase app with auth and a todo list"
-
-# Custom project directory
-python orchestrator.py --project-dir ~/my-supabase-app "Build a Supabase app"
-
-# Specify models
-python orchestrator.py --claude-model claude-sonnet-4 --cursor-model sonnet-4 "Build a Supabase app"
-
-# More retries per step
-python orchestrator.py --max-retries 3 "Build a Supabase app"
-
-# Resume a failed/interrupted run from step 3
-python orchestrator.py --resume abc123 --start-step 3 "Build a Supabase app"
-
-# List all runs
-python orchestrator.py --list-runs
-```
-
-### Analyzing logs
-
-```bash
-# Full analysis
-python analyzer.py <run_id>
-
-# Just the errors
-python analyzer.py <run_id> --errors
-
-# Tool usage breakdown (files written, commands run)
-python analyzer.py <run_id> --tools
-
-# Timeline view
-python analyzer.py <run_id> --timeline
-
-# Deep dive into a specific step
-python analyzer.py <run_id> --step 3
-
-# Export full report as JSON
-python analyzer.py <run_id> --export report
-
-# Compare two runs
-python analyzer.py --compare <run_id_1> <run_id_2>
-```
-
-### Querying logs in Supabase
-
-The migration includes ready-made views you can query in the Supabase dashboard:
+## Querying Logs
 
 ```sql
--- Summary of all runs
+-- Run overview
 SELECT * FROM orchestrator_run_summary;
 
--- All errors across runs
+-- All errors
 SELECT * FROM orchestrator_errors;
 
 -- Tool usage breakdown
 SELECT * FROM orchestrator_tool_usage;
 
--- Query specific events using JSONB
-SELECT * FROM orchestrator_events
+-- Claude Code's review verdicts
+SELECT id, step_number, phase, tool, parsed_result, duration_seconds
+FROM orchestrator_steps
+WHERE tool = 'claude_code' AND phase = 'verify';
+
+-- Web searches
+SELECT id, step_id, event_data->'message'->'content' as content
+FROM orchestrator_events
+WHERE event_data->>'type' = 'assistant'
+AND (event_data->'message'->'content')::text LIKE '%WebSearch%';
+
+-- Bash commands from Cursor Agent
+SELECT id, step_id,
+  event_data->'tool_call'->'shellToolCall'->'args'->>'command' as command
+FROM orchestrator_events
 WHERE event_data->>'type' = 'tool_call'
-  AND event_data->'tool_call'->>'name' = 'Bash';
+AND (event_data->'tool_call')::text LIKE '%shellToolCall%';
 ```
 
-## What Gets Logged
+## Files
 
-Everything. The Supabase database captures:
-
-| Table | What |
-|-------|------|
-| `orchestrator_runs` | Each orchestration run (prompt, status, timing) |
-| `orchestrator_steps` | Every phase (plan/implement/verify) with full stdout/stderr |
-| `orchestrator_events` | Every stream-json event (tool calls, file writes, errors, text) |
-
-This means you get:
-- Every file Claude Code and Cursor read or wrote
-- Every terminal command they ran
-- Every error message
-- Model names and API timing
-- Retry attempts and why they happened
-- Verification results (PASS/FAIL/PARTIAL)
-
-## Configuration
-
-Edit the constants at the top of `orchestrator.py`:
-
-```python
-CLAUDE_CODE_TIMEOUT = 600   # 10 min for planning/verification
-CURSOR_TIMEOUT = 900        # 15 min for implementation
-CURSOR_IDLE_TIMEOUT = 120   # Kill cursor if no output for 2 min (hanging bug)
-```
+| File | Purpose |
+|------|---------|
+| `orchestrator.py` | Main loop — plans, implements, verifies, retries |
+| `storage.py` | Supabase storage layer |
+| `analyzer.py` | Post-run analysis — errors, tool usage, timeline |
+| `preflight.py` | Pre-run check — verifies CLIs and connections |
+| `migration.sql` | Supabase schema — tables, indexes, views |
 
 ## Known Issues
 
-### Cursor Agent hanging
+- **Cursor Agent hanging**: The `-p` mode sometimes doesn't release the terminal. The orchestrator kills it after 2 minutes of idle time.
+- **Verification is file-based**: Claude Code verifies by reading files, not by running the app. Runtime errors (like React version conflicts) aren't caught.
+- **Context limits**: For complex multi-step builds, later steps may lack full context. The orchestrator passes a summary of completed steps.
 
-The Cursor CLI has a [known bug](https://forum.cursor.com/t/cursor-agent-hanging-for-n-seconds-when-done/130401) where it hangs after completing in `-p` mode. The orchestrator handles this with an idle timeout — if Cursor produces no output for 2 minutes, it kills the process and checks if the work was done anyway.
+## License
 
-### Large projects
-
-Both CLIs have context limits. For very large projects, steps that require understanding the full codebase might fail. The retry mechanism helps, but some manual intervention may be needed.
-
-## Project Structure
-
-```
-orchestrator/
-├── orchestrator.py    # Main orchestration loop
-├── storage.py         # Supabase storage backend
-├── analyzer.py        # Log analysis tool
-├── preflight.py       # Pre-run checks
-├── migration.sql      # Supabase table setup
-├── requirements.txt   # Python dependencies
-├── .env.example       # Environment variable template
-└── README.md
-```
-
-## Tip: Supabase-Specific Experiments
-
-Good prompts to test:
-
-```bash
-# Auth + CRUD
-"Build a Supabase todo app with email auth, RLS policies per user, and a React frontend"
-
-# Real-time
-"Build a Supabase chat app with real-time subscriptions and presence"
-
-# Edge functions
-"Build a Supabase app with an edge function that processes webhooks and stores data"
-
-# Complex schema
-"Build a Supabase project management app with teams, projects, tasks, and role-based access"
-```
+MIT
