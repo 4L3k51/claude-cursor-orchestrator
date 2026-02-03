@@ -91,6 +91,7 @@ def run_claude_code(
         "--verbose",  # Required when using --output-format=stream-json with --print
         "--allowedTools", "Bash,Read,Write,Edit,MultiEdit,LS,Glob,WebSearch,WebFetch",
         "--sandbox", "enabled",
+        "--permission-mode", "bypassPermissions",
     ]
     if system_prompt:
         cmd.extend(["--append-system-prompt", system_prompt])
@@ -112,6 +113,7 @@ def run_cursor_agent(
         CURSOR_CMD,
         "-p",
         prompt,
+        "--force",
         "--sandbox", "enabled",
         "--output-format", "stream-json",
         "--workspace", working_dir,
