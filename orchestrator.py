@@ -61,32 +61,6 @@ CURSOR_CMD = "agent"
 CLAUDE_CODE_MODEL = None  # None = use default
 CURSOR_MODEL = None       # None = use default
 
-# Allowed diagnostic commands (security: only these patterns are permitted)
-DIAGNOSTIC_ALLOWLIST = [
-    "npx tsc --noEmit",
-    "npm test",
-    "npm run lint",
-    "npm run build",
-    "npx eslint",
-    "python -m pytest",
-    "python -m py_compile",
-    "supabase db lint",
-    "supabase functions serve --no-verify-jwt",
-    "cat package.json",
-    "ls -la",
-    "node --check",
-]
-
-
-def _is_diagnostic_allowed(command: str) -> bool:
-    """Check if a diagnostic command matches the allowlist."""
-    cmd_stripped = command.strip()
-    for allowed in DIAGNOSTIC_ALLOWLIST:
-        if cmd_stripped == allowed or cmd_stripped.startswith(allowed + " "):
-            return True
-    return False
-
-
 # ─────────────────────────────────────────────
 # CLI Execution Engine
 # ─────────────────────────────────────────────
@@ -452,7 +426,7 @@ RECOMMENDATION: PROCEED | RETRY | MODIFY_PLAN | WEB_SEARCH | RUN_DIAGNOSTIC | SK
 - RETRY: explain what needs to be fixed; implementer will retry.
 - MODIFY_PLAN: explain what should change in the plan.
 - WEB_SEARCH: look up something (e.g. docs, syntax). Follow with RESOLUTION line.
-- RUN_DIAGNOSTIC: run a command to diagnose (e.g. test, lint). Follow with RESOLUTION line.
+- RUN_DIAGNOSTIC: run a command to diagnose (e.g. npm test, npx tsc --noEmit, python -m pytest). Follow with RESOLUTION line.
 - SKIP: skip this step (e.g. not applicable). Follow with RESOLUTION line.
 
 Only include a RESOLUTION line when the recommendation requires parameters. PROCEED and RETRY do not need one.
@@ -843,53 +817,34 @@ def run_orchestration(
                 command = resolution.get("command", "")
                 reason = resolution.get("reason", "Verifier requested diagnostic")
 
-                if command and _is_diagnostic_allowed(command):
+                if command:
                     print(f"\n  🩺 Running diagnostic: {command}")
                     print(f"     Reason: {reason}")
 
-                    try:
-                        diag_proc = subprocess.run(
-                            command,
-                            shell=True,
-                            capture_output=True,
-                            text=True,
-                            cwd=project_dir,
-                            timeout=60,
-                        )
-                        diag_output = diag_proc.stdout[:2000]
-                        diag_errors = diag_proc.stderr[:1000]
+                    diag_prompt = (
+                        f"Run this command and return the full output:\n\n"
+                        f"  {command}\n\n"
+                        f"Do not modify any files. Only run the command and report what it outputs."
+                    )
+                    diag_result = run_claude_code(
+                        prompt=diag_prompt,
+                        working_dir=project_dir,
+                        system_prompt="You are a diagnostic assistant. Run the requested command "
+                        "using the Bash tool and return its complete output. Do not modify any "
+                        "files or fix any issues — only run the command and report the results.",
+                    )
 
-                        diag_result = CLIResult()
-                        diag_result.stdout = diag_proc.stdout
-                        diag_result.stderr = diag_proc.stderr
-                        diag_result.exit_code = diag_proc.returncode
-                        diag_result.text_result = diag_output
-                        diag_result.duration = 0.0
+                    log_step(store, run_id, step_num, "diagnostic", "claude_code",
+                             diag_prompt, diag_result, build_phase=step.get("build_phase"))
 
-                        log_step(store, run_id, step_num, "diagnostic", "orchestrator",
-                                 command, diag_result, build_phase=step.get("build_phase"))
-
-                        step["instructions"] += (
-                            f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
-                            + "\n".join(f"- {i}" for i in verification["issues"])
-                            + f"\n\nDIAGNOSTIC OUTPUT ({command}):\n{diag_output}"
-                        )
-                        if diag_errors:
-                            step["instructions"] += f"\nDIAGNOSTIC STDERR:\n{diag_errors}"
-
-                    except subprocess.TimeoutExpired:
-                        print(f"\n  ⚠️  Diagnostic timed out after 60s")
-                        step["instructions"] += (
-                            f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
-                            + "\n".join(f"- {i}" for i in verification["issues"])
-                            + f"\n\nDIAGNOSTIC: Command '{command}' timed out after 60s"
-                        )
+                    diag_output = diag_result.text_result[:2000] if diag_result.text_result else "No output."
+                    step["instructions"] += (
+                        f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
+                        + "\n".join(f"- {i}" for i in verification["issues"])
+                        + f"\n\nDIAGNOSTIC OUTPUT ({command}):\n{diag_output}"
+                    )
                 else:
-                    if command:
-                        print(f"\n  ⚠️  Diagnostic command not in allowlist: {command}")
-                    else:
-                        print(f"\n  ⚠️  No diagnostic command provided")
-
+                    print(f"\n  ⚠️  No diagnostic command provided")
                     step["instructions"] += (
                         f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
                         + "\n".join(f"- {i}" for i in verification["issues"])
@@ -1056,5 +1011,18 @@ RESOLUTION: {"query": "supabase RLS policy syntax"}"""
         assert result["recommendation"] == "WEB_SEARCH"
         assert result["resolution"]["query"] == "supabase RLS policy syntax"
         print("PASS:", result)
+
+        # Test RUN_DIAGNOSTIC parsing
+        text2 = """STATUS: FAIL
+ISSUES:
+- Type errors in auth module
+SUMMARY: TypeScript compilation fails
+RECOMMENDATION: RUN_DIAGNOSTIC
+RESOLUTION: {"command": "npx tsc --noEmit", "reason": "check type errors"}"""
+        result2 = parse_verification(text2)
+        assert result2["recommendation"] == "RUN_DIAGNOSTIC"
+        assert result2["resolution"]["command"] == "npx tsc --noEmit"
+        assert result2["resolution"]["reason"] == "check type errors"
+        print("PASS:", result2)
         sys.exit(0)
     main()
