@@ -449,6 +449,41 @@ IMPLEMENTER OUTPUT:
 Check the project directory for the actual files. Verify the implementation is correct.
 """
 
+SMOKE_TEST_SYSTEM_PROMPT = """\
+You are a SMOKE TESTER in an automated coding pipeline. Your job is to verify
+that the completed project actually runs.
+
+RULES:
+- Look at the project files to determine what kind of project this is (Node.js, Python, etc.)
+- Find and run the appropriate start command (npm start, npm run dev, python main.py, etc.)
+- If a test suite exists (npm test, pytest, etc.), run it
+- Let the app start, wait a few seconds, then check if it's still running or crashed
+- If there's a web server, try to reach its health endpoint or main page with curl
+- Kill any long-running processes after testing (don't leave servers running)
+- Report what worked and what didn't
+
+FORMAT your response as:
+APP_STARTS: YES | NO | N/A
+TESTS_PASS: YES | NO | N/A | NO_TESTS
+ERRORS (if any):
+- [error 1]
+- [error 2]
+
+SUMMARY: [1-3 sentence assessment of whether this project actually works]
+"""
+
+SMOKE_TEST_PROMPT_TEMPLATE = """\
+The project is complete. Verify it actually runs.
+
+PROJECT GOAL: {user_prompt}
+
+STEPS COMPLETED:
+{completed_steps}
+
+Check the project files, determine how to start it, run it, and report the results.
+If there are tests, run them too.
+"""
+
 
 # ─────────────────────────────────────────────
 # Plan Parser
@@ -557,6 +592,48 @@ def parse_verification(verify_text: str) -> dict:
     return result
 
 
+def parse_smoke_test(smoke_text: str) -> dict:
+    """Parse the smoke tester's output into structured result."""
+    result = {
+        "app_starts": "UNKNOWN",
+        "tests_pass": "UNKNOWN",
+        "errors": [],
+        "summary": "",
+    }
+
+    for line in smoke_text.split("\n"):
+        stripped = line.strip()
+        upper = stripped.upper()
+
+        if upper.startswith("APP_STARTS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                result["app_starts"] = "YES"
+            elif "NO" in val and "N/A" not in val:
+                result["app_starts"] = "NO"
+            elif "N/A" in val:
+                result["app_starts"] = "N/A"
+
+        elif upper.startswith("TESTS_PASS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                result["tests_pass"] = "YES"
+            elif "NO_TESTS" in val:
+                result["tests_pass"] = "NO_TESTS"
+            elif "NO" in val and "N/A" not in val:
+                result["tests_pass"] = "NO"
+            elif "N/A" in val:
+                result["tests_pass"] = "N/A"
+
+        elif upper.startswith("SUMMARY:"):
+            result["summary"] = stripped.split(":", 1)[1].strip()
+
+        elif stripped.startswith("- ") and result["app_starts"] != "UNKNOWN":
+            result["errors"].append(stripped[2:])
+
+    return result
+
+
 # ─────────────────────────────────────────────
 # Logging helpers
 # ─────────────────────────────────────────────
@@ -596,6 +673,7 @@ def run_orchestration(
     max_retries: int = 2,
     resume_run_id: Optional[str] = None,
     start_from_step: Optional[int] = None,
+    skip_smoke_test: bool = False,
 ):
     """
     Main orchestration loop:
@@ -871,12 +949,55 @@ def run_orchestration(
                 )
                 break
 
-    # ── Phase 3: Completion ───────────────────────
+    if not skip_smoke_test:
+        # ── Phase 3: Smoke Test ───────────────────────
+        print(f"\n{'=' * 60}")
+        print("  PHASE 3: SMOKE TEST (Claude Code)")
+        print(f"{'=' * 60}")
+
+        smoke_prompt = SMOKE_TEST_PROMPT_TEMPLATE.format(
+            user_prompt=user_prompt,
+            completed_steps="\n".join(completed_descriptions) if completed_descriptions else "None",
+        )
+
+        smoke_result = run_claude_code(
+            prompt=smoke_prompt,
+            working_dir=project_dir,
+            system_prompt=SMOKE_TEST_SYSTEM_PROMPT,
+        )
+
+        log_step(store, run_id, len(steps) + 1, "smoke_test", "claude_code",
+                 smoke_prompt, smoke_result)
+
+        smoke = parse_smoke_test(smoke_result.text_result)
+
+        app_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["app_starts"], "❓")
+        test_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭", "NO_TESTS": "⏭"}.get(smoke["tests_pass"], "❓")
+
+        print(f"\n  {app_emoji} App starts: {smoke['app_starts']}")
+        print(f"  {test_emoji} Tests pass: {smoke['tests_pass']}")
+        if smoke["errors"]:
+            print(f"  Errors:")
+            for err in smoke["errors"]:
+                print(f"    • {err}")
+        print(f"  Summary: {smoke['summary']}")
+
+        if smoke["app_starts"] == "NO":
+            run_final_status = "completed_failing"
+        elif smoke["tests_pass"] == "NO":
+            run_final_status = "completed_tests_failing"
+        else:
+            run_final_status = "completed"
+    else:
+        print(f"\n  ⏭  Smoke test skipped (--skip-smoke-test)")
+        run_final_status = "completed"
+
+    # ── Phase 4: Completion ───────────────────────
     print(f"\n{'=' * 60}")
     print("  ORCHESTRATION COMPLETE")
     print(f"{'=' * 60}")
 
-    store.finish_run(run_id)
+    store.finish_run(run_id, status=run_final_status)
 
     # Print summary
     all_steps = store.get_steps(run_id)
@@ -955,6 +1076,8 @@ def main():
                         help="Start from this step number (with --resume)")
     parser.add_argument("--max-retries", type=int, default=2,
                         help="Max retries per step (default: 2)")
+    parser.add_argument("--skip-smoke-test", action="store_true",
+                        help="Skip the smoke test phase")
     parser.add_argument("--list-runs", action="store_true",
                         help="List all runs")
     parser.add_argument("--claude-model", default=None,
@@ -995,6 +1118,7 @@ def main():
         max_retries=args.max_retries,
         resume_run_id=args.resume,
         start_from_step=args.start_step,
+        skip_smoke_test=args.skip_smoke_test,
     )
 
 
@@ -1023,5 +1147,19 @@ RESOLUTION: {"command": "npx tsc --noEmit", "reason": "check type errors"}"""
         assert result2["resolution"]["command"] == "npx tsc --noEmit"
         assert result2["resolution"]["reason"] == "check type errors"
         print("PASS:", result2)
+
+        # Test smoke test parsing
+        text3 = """APP_STARTS: YES
+TESTS_PASS: NO
+ERRORS:
+- 2 of 5 tests failed
+- Missing DATABASE_URL
+SUMMARY: App starts but tests fail."""
+        result3 = parse_smoke_test(text3)
+        assert result3["app_starts"] == "YES"
+        assert result3["tests_pass"] == "NO"
+        assert len(result3["errors"]) == 2
+        assert "DATABASE_URL" in result3["errors"][1]
+        print("PASS:", result3)
         sys.exit(0)
     main()
