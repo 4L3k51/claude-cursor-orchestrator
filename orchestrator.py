@@ -51,6 +51,7 @@ DEFAULT_PROJECT_DIR.mkdir(parents=True, exist_ok=True)
 CLAUDE_CODE_TIMEOUT = 600   # 10 min for planning/verification
 CURSOR_TIMEOUT = 900        # 15 min for implementation (can be complex)
 CURSOR_IDLE_TIMEOUT = 120   # Kill cursor if no output for 2 min (hanging bug workaround)
+MAX_RESOLUTIONS_PER_STEP = 5  # total resolution actions (search, diagnostic, retry) before giving up
 
 # CLI commands
 CLAUDE_CODE_CMD = "claude"
@@ -59,6 +60,31 @@ CURSOR_CMD = "agent"
 # Models (adjust to what you have access to)
 CLAUDE_CODE_MODEL = None  # None = use default
 CURSOR_MODEL = None       # None = use default
+
+# Allowed diagnostic commands (security: only these patterns are permitted)
+DIAGNOSTIC_ALLOWLIST = [
+    "npx tsc --noEmit",
+    "npm test",
+    "npm run lint",
+    "npm run build",
+    "npx eslint",
+    "python -m pytest",
+    "python -m py_compile",
+    "supabase db lint",
+    "supabase functions serve --no-verify-jwt",
+    "cat package.json",
+    "ls -la",
+    "node --check",
+]
+
+
+def _is_diagnostic_allowed(command: str) -> bool:
+    """Check if a diagnostic command matches the allowlist."""
+    cmd_stripped = command.strip()
+    for allowed in DIAGNOSTIC_ALLOWLIST:
+        if cmd_stripped == allowed or cmd_stripped.startswith(allowed + " "):
+            return True
+    return False
 
 
 # ─────────────────────────────────────────────
@@ -365,12 +391,15 @@ RULES:
 - Think about the order: schema first, then backend logic, then frontend
 - Be specific about file names, function names, and expected behavior
 - Focus on Supabase specifics: schema/migrations, RLS policies, edge functions, auth setup
+- Tag each step with a build phase: setup, schema, backend, frontend, testing, or deployment
 
 FORMAT your response as:
 STEP 1: [title]
+PHASE: [one of: setup, schema, backend, frontend, testing, deployment]
 [detailed instruction for the implementer, 2-5 sentences]
 
 STEP 2: [title]
+PHASE: [one of: setup, schema, backend, frontend, testing, deployment]
 [detailed instruction for the implementer, 2-5 sentences]
 
 ... and so on.
@@ -418,9 +447,20 @@ ISSUES (if any):
 
 SUMMARY: [1-2 sentence assessment]
 
-RECOMMENDATION: PROCEED | RETRY | MODIFY_PLAN
-If RETRY, explain what needs to be fixed.
-If MODIFY_PLAN, explain what should change.
+RECOMMENDATION: PROCEED | RETRY | MODIFY_PLAN | WEB_SEARCH | RUN_DIAGNOSTIC | SKIP
+- PROCEED: step is good, continue.
+- RETRY: explain what needs to be fixed; implementer will retry.
+- MODIFY_PLAN: explain what should change in the plan.
+- WEB_SEARCH: look up something (e.g. docs, syntax). Follow with RESOLUTION line.
+- RUN_DIAGNOSTIC: run a command to diagnose (e.g. test, lint). Follow with RESOLUTION line.
+- SKIP: skip this step (e.g. not applicable). Follow with RESOLUTION line.
+
+Only include a RESOLUTION line when the recommendation requires parameters. PROCEED and RETRY do not need one.
+
+RESOLUTION (single line, valid JSON, only when needed):
+- WEB_SEARCH → {"query": "..."}
+- RUN_DIAGNOSTIC → {"command": "...", "reason": "..."}
+- SKIP → {"reason": "..."}
 """
 
 VERIFIER_PROMPT_TEMPLATE = """\
@@ -458,6 +498,7 @@ def parse_plan(plan_text: str) -> list[dict]:
                     "number": current_step["number"],
                     "title": current_step["title"],
                     "instructions": "\n".join(current_body).strip(),
+                    "build_phase": current_step.get("build_phase"),
                 })
 
             # Parse new step
@@ -467,13 +508,19 @@ def parse_plan(plan_text: str) -> list[dict]:
             except ValueError:
                 continue
             title = parts[1].strip() if len(parts) > 1 else ""
-            current_step = {"number": step_num, "title": title}
+            current_step = {"number": step_num, "title": title, "build_phase": None}
             current_body = []
 
         elif stripped.upper().startswith("TOTAL_STEPS:"):
             continue  # Skip this meta line
         elif current_step is not None:
-            current_body.append(line)
+            if stripped.upper().startswith("PHASE:"):
+                phase_val = stripped.split(":", 1)[1].strip().lower()
+                valid_phases = {"setup", "schema", "backend", "frontend", "testing", "deployment"}
+                if phase_val in valid_phases:
+                    current_step["build_phase"] = phase_val
+            else:
+                current_body.append(line)
 
     # Don't forget the last step
     if current_step is not None:
@@ -481,9 +528,13 @@ def parse_plan(plan_text: str) -> list[dict]:
             "number": current_step["number"],
             "title": current_step["title"],
             "instructions": "\n".join(current_body).strip(),
+            "build_phase": current_step.get("build_phase"),
         })
 
     return steps
+
+
+RECOMMENDATION_KEYWORDS = ["WEB_SEARCH", "RUN_DIAGNOSTIC", "SKIP", "RETRY", "MODIFY_PLAN"]
 
 
 def parse_verification(verify_text: str) -> dict:
@@ -493,6 +544,7 @@ def parse_verification(verify_text: str) -> dict:
         "issues": [],
         "summary": "",
         "recommendation": "PROCEED",
+        "resolution": {},
     }
 
     for line in verify_text.split("\n"):
@@ -513,12 +565,18 @@ def parse_verification(verify_text: str) -> dict:
 
         elif upper.startswith("RECOMMENDATION:"):
             rec = stripped.split(":", 1)[1].strip().upper()
-            if "RETRY" in rec:
-                result["recommendation"] = "RETRY"
-            elif "MODIFY" in rec:
-                result["recommendation"] = "MODIFY_PLAN"
-            else:
-                result["recommendation"] = "PROCEED"
+            result["recommendation"] = "PROCEED"
+            for keyword in RECOMMENDATION_KEYWORDS:
+                if keyword in rec:
+                    result["recommendation"] = keyword
+                    break
+
+        elif upper.startswith("RESOLUTION:"):
+            payload = stripped.split(":", 1)[1].strip()
+            try:
+                result["resolution"] = json.loads(payload)
+            except json.JSONDecodeError:
+                result["resolution"] = {"raw": payload}
 
         elif stripped.startswith("- ") and result["status"] != "PASS":
             result["issues"].append(stripped[2:])
@@ -531,7 +589,8 @@ def parse_verification(verify_text: str) -> dict:
 # ─────────────────────────────────────────────
 
 def log_step(store: SupabaseStorage, run_id: str, step_number: int,
-             phase: str, tool: str, prompt: str, result: CLIResult) -> int:
+             phase: str, tool: str, prompt: str, result: CLIResult,
+             build_phase: Optional[str] = None) -> int:
     """Log a step to storage. Returns step ID."""
     step_id = store.log_step(
         run_id=run_id,
@@ -544,6 +603,7 @@ def log_step(store: SupabaseStorage, run_id: str, step_number: int,
         parsed_result=result.text_result,
         exit_code=result.exit_code,
         duration_seconds=result.duration,
+        build_phase=build_phase,
     )
 
     # Batch insert events for performance - step must exist first (FK constraint)
@@ -634,15 +694,16 @@ def run_orchestration(
 
     for idx, step in enumerate(steps[start:], start=start):
         step_num = step["number"]
-        retries = 0
+        retry_count = 0
+        resolution_count = 0
 
         print(f"\n{'=' * 60}")
         print(f"  STEP {step_num}/{len(steps)}: {step['title']}")
         print(f"{'=' * 60}")
 
-        while retries <= max_retries:
+        while resolution_count < MAX_RESOLUTIONS_PER_STEP:
             # ── 2a: Implement with Cursor ──────────
-            print(f"\n  ▶ Implementing (attempt {retries + 1}/{max_retries + 1})...")
+            print(f"\n  ▶ Implementing (retry {retry_count}, resolution {resolution_count + 1}/{MAX_RESOLUTIONS_PER_STEP})...")
             print(f"  {'─' * 50}")
 
             impl_prompt = IMPLEMENTER_PROMPT_TEMPLATE.format(
@@ -660,7 +721,7 @@ def run_orchestration(
             )
 
             log_step(store, run_id, step_num, "implement", "cursor",
-                     impl_prompt, impl_result)
+                     impl_prompt, impl_result, build_phase=step.get("build_phase"))
 
             if impl_result.exit_code != 0 and not impl_result.text_result:
                 print(f"\n  ⚠️  Cursor failed (exit code {impl_result.exit_code})")
@@ -669,7 +730,8 @@ def run_orchestration(
                     if impl_result.events:
                         print("     But we got output, so checking the work anyway...")
                     else:
-                        retries += 1
+                        retry_count += 1
+                        resolution_count += 1
                         continue
 
             # ── 2b: Verify with Claude Code ────────
@@ -691,7 +753,7 @@ def run_orchestration(
             )
 
             log_step(store, run_id, step_num, "verify", "claude_code",
-                     verify_prompt, verify_result)
+                     verify_prompt, verify_result, build_phase=step.get("build_phase"))
 
             verification = parse_verification(verify_result.text_result)
 
@@ -715,17 +777,21 @@ def run_orchestration(
                 break
 
             elif verification["recommendation"] == "RETRY":
-                retries += 1
-                if retries <= max_retries:
-                    print(f"\n  🔄 Retrying step {step_num} (attempt {retries + 1})...")
+                retry_count += 1
+                resolution_count += 1
+                if retry_count <= max_retries and resolution_count < MAX_RESOLUTIONS_PER_STEP:
+                    print(f"\n  🔄 Retrying step {step_num} (attempt {retry_count + 1})...")
                     step["instructions"] += (
                         f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
                         + "\n".join(f"- {i}" for i in verification["issues"])
                     )
                 else:
-                    print(f"\n  ❌ Max retries reached for step {step_num}. Continuing anyway.")
+                    if retry_count > max_retries:
+                        print(f"\n  ❌ Max retries reached for step {step_num}. Continuing anyway.")
+                    else:
+                        print(f"\n  ❌ Max resolutions reached for step {step_num}. Continuing anyway.")
                     completed_descriptions.append(
-                        f"Step {step_num} ({step['title']}): Completed with issues"
+                        f"Step {step_num} ({step['title']}): Completed with issues ({retry_count} retries, {resolution_count} resolutions)"
                     )
                     break
 
@@ -733,6 +799,115 @@ def run_orchestration(
                 print(f"\n  📝 Plan modification requested. Continuing with best effort.")
                 completed_descriptions.append(
                     f"Step {step_num} ({step['title']}): Needs attention"
+                )
+                break
+
+            elif verification["recommendation"] == "WEB_SEARCH":
+                resolution = verification.get("resolution", {})
+                query = resolution.get("query", " ".join(verification["issues"]))
+                print(f"\n  🔍 Searching: {query}")
+
+                search_prompt = (
+                    f"Search the web for: {query}\n\n"
+                    f"Context: This is for step {step_num} of a project.\n"
+                    f"Step goal: {step['title']}\n"
+                    f"Issues encountered: {verification['issues']}\n\n"
+                    f"Return concise, actionable findings. Include code examples if relevant."
+                )
+                search_result = run_claude_code(
+                    prompt=search_prompt,
+                    working_dir=project_dir,
+                    system_prompt="You are a research assistant. Search the web and return "
+                    "concise, actionable technical findings. Focus on code examples and correct API usage.",
+                )
+
+                log_step(store, run_id, step_num, "research", "claude_code",
+                        search_prompt, search_result, build_phase=step.get("build_phase"))
+
+                findings = search_result.text_result[:2000] if search_result.text_result else "No results found."
+                step["instructions"] += (
+                    f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
+                    + "\n".join(f"- {i}" for i in verification["issues"])
+                    + f"\n\nRESEARCH FINDINGS (use this information):\n{findings}"
+                )
+                resolution_count += 1
+                if resolution_count >= MAX_RESOLUTIONS_PER_STEP:
+                    print(f"\n  ❌ Max resolutions reached for step {step_num}. Continuing anyway.")
+                    completed_descriptions.append(
+                        f"Step {step_num} ({step['title']}): Completed with issues ({retry_count} retries, {resolution_count} resolutions)"
+                    )
+                    break
+
+            elif verification["recommendation"] == "RUN_DIAGNOSTIC":
+                resolution = verification.get("resolution", {})
+                command = resolution.get("command", "")
+                reason = resolution.get("reason", "Verifier requested diagnostic")
+
+                if command and _is_diagnostic_allowed(command):
+                    print(f"\n  🩺 Running diagnostic: {command}")
+                    print(f"     Reason: {reason}")
+
+                    try:
+                        diag_proc = subprocess.run(
+                            command,
+                            shell=True,
+                            capture_output=True,
+                            text=True,
+                            cwd=project_dir,
+                            timeout=60,
+                        )
+                        diag_output = diag_proc.stdout[:2000]
+                        diag_errors = diag_proc.stderr[:1000]
+
+                        diag_result = CLIResult()
+                        diag_result.stdout = diag_proc.stdout
+                        diag_result.stderr = diag_proc.stderr
+                        diag_result.exit_code = diag_proc.returncode
+                        diag_result.text_result = diag_output
+                        diag_result.duration = 0.0
+
+                        log_step(store, run_id, step_num, "diagnostic", "orchestrator",
+                                 command, diag_result, build_phase=step.get("build_phase"))
+
+                        step["instructions"] += (
+                            f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
+                            + "\n".join(f"- {i}" for i in verification["issues"])
+                            + f"\n\nDIAGNOSTIC OUTPUT ({command}):\n{diag_output}"
+                        )
+                        if diag_errors:
+                            step["instructions"] += f"\nDIAGNOSTIC STDERR:\n{diag_errors}"
+
+                    except subprocess.TimeoutExpired:
+                        print(f"\n  ⚠️  Diagnostic timed out after 60s")
+                        step["instructions"] += (
+                            f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
+                            + "\n".join(f"- {i}" for i in verification["issues"])
+                            + f"\n\nDIAGNOSTIC: Command '{command}' timed out after 60s"
+                        )
+                else:
+                    if command:
+                        print(f"\n  ⚠️  Diagnostic command not in allowlist: {command}")
+                    else:
+                        print(f"\n  ⚠️  No diagnostic command provided")
+
+                    step["instructions"] += (
+                        f"\n\nPREVIOUS ATTEMPT ISSUES (fix these):\n"
+                        + "\n".join(f"- {i}" for i in verification["issues"])
+                    )
+
+                resolution_count += 1
+                if resolution_count >= MAX_RESOLUTIONS_PER_STEP:
+                    print(f"\n  ❌ Max resolutions reached for step {step_num}. Continuing anyway.")
+                    completed_descriptions.append(
+                        f"Step {step_num} ({step['title']}): Completed with issues ({retry_count} retries, {resolution_count} resolutions)"
+                    )
+                    break
+
+            elif verification["recommendation"] == "SKIP":
+                reason = verification.get("resolution", {}).get("reason", "Verifier recommended skipping")
+                print(f"\n  ⏭  Skipping step {step_num}: {reason}")
+                completed_descriptions.append(
+                    f"Step {step_num} ({step['title']}): SKIPPED - {reason}"
                 )
                 break
 
@@ -870,4 +1045,16 @@ def main():
 
 
 if __name__ == "__main__":
+    if "--test-parse-verification" in sys.argv:
+        text = """STATUS: FAIL
+ISSUES:
+- RLS policy syntax is wrong
+SUMMARY: Bad policy
+RECOMMENDATION: WEB_SEARCH
+RESOLUTION: {"query": "supabase RLS policy syntax"}"""
+        result = parse_verification(text)
+        assert result["recommendation"] == "WEB_SEARCH"
+        assert result["resolution"]["query"] == "supabase RLS policy syntax"
+        print("PASS:", result)
+        sys.exit(0)
     main()

@@ -28,13 +28,27 @@ You: "Build a Supabase todo app with auth"
 
 For each step, the orchestrator runs:
 
-1. **Plan** — Claude Code generates a step-by-step implementation plan
+1. **Plan** — Claude Code generates a step-by-step implementation plan. Each step is tagged with a `build_phase` (`setup`, `schema`, `backend`, `frontend`, `testing`, `deployment`)
 2. **Implement** — Cursor Agent builds each step (`--force` auto-applies changes)
-3. **Review** — Claude Code reads the actual project files and verifies Cursor's work is correct
-4. **Retry or Proceed** — If Claude Code says FAIL → Cursor retries with the issues appended. If PASS → next step
+3. **Verify** — Claude Code reads the actual project files and verifies Cursor's work
+4. **Resolve** — Based on the verification verdict, the orchestrator picks a resolution strategy:
+
+| Verdict | Strategy | What happens |
+|---------|----------|--------------|
+| `PROCEED` | Continue | Move to the next step |
+| `RETRY` | Retry | Append issues to the prompt, re-run Cursor |
+| `WEB_SEARCH` | Research | Claude Code searches the web for docs/examples, appends findings, then retries |
+| `RUN_DIAGNOSTIC` | Diagnose | Run an allowlisted command (`npx tsc --noEmit`, `npm test`, etc.), append output, then retry |
+| `SKIP` | Skip | Mark the step as skipped with a reason and move on |
+| `MODIFY_PLAN` | Continue | Log the issue and continue with best effort |
+
 5. **Log** — Every token, tool call, file write, bash command, web search, and error → Supabase
 
-Claude Code acts as the reviewer of Cursor Agent's implementation at every step. If Cursor makes a mistake, Claude Code catches it and the orchestrator sends Cursor back with specific feedback until the step passes.
+The verifier decides which strategy to use by returning a `RECOMMENDATION` and an optional `RESOLUTION` JSON payload (e.g. `{"query": "supabase RLS policy syntax"}` for web search, or `{"command": "npx tsc --noEmit"}` for diagnostics). The orchestrator executes it mechanically.
+
+Two separate counters control the loop per step:
+- **`retry_count`** — capped by `--max-retries` (default 2). Only incremented on actual Cursor retries
+- **`resolution_count`** — capped by `MAX_RESOLUTIONS_PER_STEP` (default 5). Incremented on every resolution action (retry, search, diagnostic). This prevents infinite loops where the verifier alternates between search and retry
 
 ## What Gets Logged
 
@@ -43,7 +57,10 @@ Everything is stored as JSONB in Supabase, queryable with SQL:
 - Tool calls (`shellToolCall`, `editToolCall`, `readToolCall`, `WebSearch`, `WebFetch`)
 - File diffs (full before/after content for every edit)
 - Bash output (stdout, stderr, exit codes, execution time)
-- Claude Code's review verdicts (PASS/FAIL with reasoning)
+- Verification verdicts (PASS/FAIL/PARTIAL with reasoning and resolution strategy)
+- Research actions (web search queries and findings)
+- Diagnostic runs (command, stdout/stderr, exit code)
+- Build phase per step (`setup`, `schema`, `backend`, `frontend`, `testing`, `deployment`)
 - Token usage (input/output tokens, cache hits, model used)
 - Errors and retries
 - Timing per step, per phase, per API call
@@ -108,10 +125,26 @@ SELECT * FROM orchestrator_errors;
 -- Tool usage breakdown
 SELECT * FROM orchestrator_tool_usage;
 
--- Claude Code's review verdicts
+-- Verification verdicts
 SELECT id, step_number, phase, tool, parsed_result, duration_seconds
 FROM orchestrator_steps
 WHERE tool = 'claude_code' AND phase = 'verify';
+
+-- Steps by build phase
+SELECT step_number, phase, tool, build_phase, duration_seconds
+FROM orchestrator_steps
+WHERE build_phase IS NOT NULL
+ORDER BY step_number;
+
+-- Research actions (web searches triggered by verification)
+SELECT step_number, parsed_result, duration_seconds
+FROM orchestrator_steps
+WHERE phase = 'research';
+
+-- Diagnostic runs
+SELECT step_number, prompt_sent AS command, parsed_result, exit_code
+FROM orchestrator_steps
+WHERE phase = 'diagnostic';
 
 -- Web searches
 SELECT id, step_id, event_data->'message'->'content' as content
@@ -131,7 +164,7 @@ AND (event_data->'tool_call')::text LIKE '%shellToolCall%';
 
 | File | Purpose |
 |------|---------|
-| `orchestrator.py` | Main loop — plans, implements, verifies, retries |
+| `orchestrator.py` | Main loop — plans, implements, verifies, resolves (retry/search/diagnose/skip) |
 | `storage.py` | Supabase storage layer |
 | `analyzer.py` | Post-run analysis — errors, tool usage, timeline |
 | `preflight.py` | Pre-run check — verifies CLIs and connections |

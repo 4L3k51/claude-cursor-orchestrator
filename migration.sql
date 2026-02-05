@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_steps (
     parsed_result TEXT,              -- extracted text result
     exit_code INTEGER,
     duration_seconds DOUBLE PRECISION,
+    build_phase TEXT,               -- 'setup', 'schema', 'backend', 'frontend', 'testing', 'deployment'
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -89,6 +90,20 @@ CREATE POLICY "Service role full access on steps"
 CREATE POLICY "Service role full access on events"
     ON orchestrator_events FOR ALL
     USING (true) WITH CHECK (true);
+
+
+-- Migration: add build_phase column if not exists
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'orchestrator_steps' AND column_name = 'build_phase'
+    ) THEN
+        ALTER TABLE orchestrator_steps ADD COLUMN build_phase TEXT;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_steps_build_phase ON orchestrator_steps(build_phase);
 
 
 -- ============================================================
