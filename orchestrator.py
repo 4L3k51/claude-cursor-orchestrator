@@ -366,6 +366,15 @@ RULES:
 - Focus on Supabase specifics: schema/migrations, RLS policies, edge functions, auth setup
 - Tag each step with a build phase: setup, schema, backend, frontend, testing, or deployment
 
+IDEMPOTENT DDL (critical for retry safety):
+- All SQL migrations MUST be idempotent so they can be safely re-run:
+  - Use CREATE TABLE IF NOT EXISTS (not plain CREATE TABLE)
+  - Use CREATE INDEX IF NOT EXISTS
+  - Use DROP POLICY IF EXISTS before CREATE POLICY
+  - Use CREATE OR REPLACE FUNCTION for functions
+  - Use CREATE OR REPLACE VIEW for views
+- This ensures migrations succeed even if partially applied in a previous attempt
+
 FORMAT your response as:
 STEP 1: [title]
 PHASE: [one of: setup, schema, backend, frontend, testing, deployment]
@@ -459,12 +468,16 @@ RULES:
 - If a test suite exists (npm test, pytest, etc.), run it
 - Let the app start, wait a few seconds, then check if it's still running or crashed
 - If there's a web server, try to reach its health endpoint or main page with curl
+- If Supabase credentials are provided:
+  - Test authentication flow (sign up, sign in)
+  - Make authenticated API requests to verify the full stack works
 - Kill any long-running processes after testing (don't leave servers running)
 - Report what worked and what didn't
 
 FORMAT your response as:
 APP_STARTS: YES | NO | N/A
 TESTS_PASS: YES | NO | N/A | NO_TESTS
+AUTH_WORKS: YES | NO | N/A
 ERRORS (if any):
 - [error 1]
 - [error 2]
@@ -477,11 +490,101 @@ The project is complete. Verify it actually runs.
 
 PROJECT GOAL: {user_prompt}
 
+{credentials_section}
+
 STEPS COMPLETED:
 {completed_steps}
 
 Check the project files, determine how to start it, run it, and report the results.
 If there are tests, run them too.
+{auth_instructions}
+"""
+
+MIGRATION_EXEC_SYSTEM_PROMPT = """\
+You are executing database migrations for a Supabase project.
+
+RULES:
+- Find all SQL migration files in the project (supabase/migrations/*.sql, migrations/*.sql, schema.sql, etc.)
+- Execute them against the database using psql with the provided connection string
+- Run: psql "$DATABASE_URL" -f <migration_file>
+- Execute migrations in order (by filename timestamp if present)
+- Report which migrations were executed and any errors
+
+IDEMPOTENCY HANDLING (critical for retries):
+- If a migration fails with "already exists" errors (e.g., "relation X already exists",
+  "constraint X already exists", "index X already exists"), these indicate partial
+  completion from a previous attempt.
+- After running migrations, verify the actual database state using: psql "$DATABASE_URL" -c "\\dt"
+- If ALL failures are "already exists" AND the expected tables/objects exist, report STATUS: SUCCESS
+- Only report STATUS: FAILED for actual failures (syntax errors, permission errors, etc.)
+
+FORMAT your response as:
+MIGRATIONS_FOUND: [number]
+MIGRATIONS_EXECUTED: [number]
+STATUS: SUCCESS | FAILED
+ERRORS (if any):
+- [error 1]
+- [error 2]
+
+SUMMARY: [1-2 sentence assessment]
+"""
+
+MIGRATION_EXEC_PROMPT_TEMPLATE = """\
+Execute the database migrations for this step against the real Supabase database.
+
+STEP: {step_number} - {step_title}
+
+DATABASE_URL: {db_url}
+
+Find all migration files created or modified in this step and execute them using:
+  psql "$DATABASE_URL" -f <migration_file>
+
+Report the results. If you encounter "already exists" errors but the schema looks correct, that's OK.
+"""
+
+RLS_TEST_SYSTEM_PROMPT = """\
+You are testing Row Level Security policies on a live Supabase database.
+
+RULES:
+- Create a test user using the Supabase Auth API (service_role key)
+- Attempt to access data as that user using the anon key + user JWT
+- Verify that:
+  1. Authenticated users can only see their own data
+  2. Unauthenticated requests are properly blocked
+  3. Service role can bypass RLS (expected behavior)
+- Clean up the test user when done
+- Use curl to make test requests to the PostgREST API
+
+FORMAT your response as:
+TEST_USER_CREATED: YES | NO
+TESTS_RUN: [number]
+TESTS_PASSED: [number]
+STATUS: SUCCESS | FAILED
+RLS_ENFORCED: YES | NO | PARTIAL
+ERRORS (if any):
+- [error 1]
+- [error 2]
+
+SUMMARY: [1-2 sentence assessment of RLS security]
+"""
+
+RLS_TEST_PROMPT_TEMPLATE = """\
+Test the Row Level Security policies created in this step against the live Supabase database.
+
+STEP: {step_number} - {step_title}
+
+SUPABASE_URL: {supabase_url}
+SUPABASE_ANON_KEY: {supabase_anon_key}
+SUPABASE_SERVICE_KEY: {supabase_service_key}
+
+Test plan:
+1. Create a test user via Auth API: curl -X POST "{supabase_url}/auth/v1/admin/users" with service_role key
+2. Sign in as that user to get a JWT
+3. Make requests to tables that have RLS policies
+4. Verify unauthorized access is blocked
+5. Clean up the test user
+
+Report whether RLS is properly enforced.
 """
 
 
@@ -597,6 +700,7 @@ def parse_smoke_test(smoke_text: str) -> dict:
     result = {
         "app_starts": "UNKNOWN",
         "tests_pass": "UNKNOWN",
+        "auth_works": "UNKNOWN",
         "errors": [],
         "summary": "",
     }
@@ -625,6 +729,15 @@ def parse_smoke_test(smoke_text: str) -> dict:
             elif "N/A" in val:
                 result["tests_pass"] = "N/A"
 
+        elif upper.startswith("AUTH_WORKS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                result["auth_works"] = "YES"
+            elif "NO" in val and "N/A" not in val:
+                result["auth_works"] = "NO"
+            elif "N/A" in val:
+                result["auth_works"] = "N/A"
+
         elif upper.startswith("SUMMARY:"):
             result["summary"] = stripped.split(":", 1)[1].strip()
 
@@ -632,6 +745,112 @@ def parse_smoke_test(smoke_text: str) -> dict:
             result["errors"].append(stripped[2:])
 
     return result
+
+
+def parse_migration_result(migration_text: str) -> dict:
+    """Parse the migration executor's output."""
+    result = {
+        "migrations_found": 0,
+        "migrations_executed": 0,
+        "status": "UNKNOWN",
+        "errors": [],
+        "summary": "",
+    }
+
+    for line in migration_text.split("\n"):
+        stripped = line.strip()
+        upper = stripped.upper()
+
+        if upper.startswith("MIGRATIONS_FOUND:"):
+            try:
+                result["migrations_found"] = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif upper.startswith("MIGRATIONS_EXECUTED:"):
+            try:
+                result["migrations_executed"] = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif upper.startswith("STATUS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            result["status"] = "SUCCESS" if "SUCCESS" in val else "FAILED"
+        elif upper.startswith("SUMMARY:"):
+            result["summary"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("- "):
+            result["errors"].append(stripped[2:])
+
+    return result
+
+
+def parse_rls_test_result(rls_text: str) -> dict:
+    """Parse the RLS tester's output."""
+    result = {
+        "test_user_created": "UNKNOWN",
+        "tests_run": 0,
+        "tests_passed": 0,
+        "status": "UNKNOWN",
+        "rls_enforced": "UNKNOWN",
+        "errors": [],
+        "summary": "",
+    }
+
+    for line in rls_text.split("\n"):
+        stripped = line.strip()
+        upper = stripped.upper()
+
+        if upper.startswith("TEST_USER_CREATED:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            result["test_user_created"] = "YES" if "YES" in val else "NO"
+        elif upper.startswith("TESTS_RUN:"):
+            try:
+                result["tests_run"] = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif upper.startswith("TESTS_PASSED:"):
+            try:
+                result["tests_passed"] = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif upper.startswith("STATUS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            result["status"] = "SUCCESS" if "SUCCESS" in val else "FAILED"
+        elif upper.startswith("RLS_ENFORCED:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                result["rls_enforced"] = "YES"
+            elif "PARTIAL" in val:
+                result["rls_enforced"] = "PARTIAL"
+            elif "NO" in val:
+                result["rls_enforced"] = "NO"
+        elif upper.startswith("SUMMARY:"):
+            result["summary"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("- "):
+            result["errors"].append(stripped[2:])
+
+    return result
+
+
+def redact_credentials(text: str, credentials: dict) -> str:
+    """Redact credential values from text for safe logging."""
+    redacted = text
+    for key, value in credentials.items():
+        if value:
+            redacted = redacted.replace(value, "***REDACTED***")
+    return redacted
+
+
+def check_psql_available() -> bool:
+    """Check if psql is available in the system PATH."""
+    try:
+        result = subprocess.run(
+            ["psql", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -674,6 +893,10 @@ def run_orchestration(
     resume_run_id: Optional[str] = None,
     start_from_step: Optional[int] = None,
     skip_smoke_test: bool = False,
+    target_supabase_url: Optional[str] = None,
+    target_supabase_anon_key: Optional[str] = None,
+    target_supabase_service_key: Optional[str] = None,
+    target_supabase_db_url: Optional[str] = None,
 ):
     """
     Main orchestration loop:
@@ -689,6 +912,27 @@ def run_orchestration(
     store = create_storage()
 
     os.makedirs(project_dir, exist_ok=True)
+
+    # Write target Supabase credentials to .env.local if provided
+    if target_supabase_url or target_supabase_anon_key:
+        env_local_path = os.path.join(project_dir, ".env.local")
+        env_lines = []
+        if target_supabase_url:
+            env_lines.append(f"NEXT_PUBLIC_SUPABASE_URL={target_supabase_url}")
+            env_lines.append(f"VITE_SUPABASE_URL={target_supabase_url}")
+            env_lines.append(f"SUPABASE_URL={target_supabase_url}")
+        if target_supabase_anon_key:
+            env_lines.append(f"NEXT_PUBLIC_SUPABASE_ANON_KEY={target_supabase_anon_key}")
+            env_lines.append(f"VITE_SUPABASE_ANON_KEY={target_supabase_anon_key}")
+            env_lines.append(f"SUPABASE_ANON_KEY={target_supabase_anon_key}")
+        if target_supabase_service_key:
+            env_lines.append(f"SUPABASE_SERVICE_ROLE_KEY={target_supabase_service_key}")
+        if target_supabase_db_url:
+            env_lines.append(f"DATABASE_URL={target_supabase_db_url}")
+
+        with open(env_local_path, "w") as f:
+            f.write("\n".join(env_lines) + "\n")
+        print(f"  Created .env.local with target Supabase credentials")
 
     run_id = resume_run_id or str(uuid.uuid4())[:8]
 
@@ -742,6 +986,18 @@ def run_orchestration(
     # ── Phase 2: Implementation Loop ──────────────
     start = (start_from_step or 1) - 1
     completed_descriptions = []
+
+    # Track psql availability for migration execution (checked once on first use)
+    psql_checked = False
+    psql_available = False
+
+    # Credentials dict for redaction in logs
+    credentials_to_redact = {
+        "supabase_url": target_supabase_url,
+        "supabase_anon_key": target_supabase_anon_key,
+        "supabase_service_key": target_supabase_service_key,
+        "supabase_db_url": target_supabase_db_url,
+    }
 
     for idx, step in enumerate(steps[start:], start=start):
         step_num = step["number"]
@@ -822,6 +1078,129 @@ def run_orchestration(
             print(f"     Recommendation: {verification['recommendation']}")
 
             if verification["recommendation"] == "PROCEED":
+                # ── Runtime execution for schema steps ──────
+                is_schema_step = step.get("build_phase") == "schema"
+                has_runtime_creds = target_supabase_db_url and target_supabase_service_key
+
+                if is_schema_step and has_runtime_creds:
+                    # Check psql availability (once per run)
+                    if not psql_checked:
+                        psql_checked = True
+                        psql_available = check_psql_available()
+                        if psql_available:
+                            print(f"\n  ✓ psql is available for migration execution")
+                        else:
+                            print(f"\n  ⚠️  psql not found - skipping migration execution")
+                            print(f"     Install PostgreSQL client to enable runtime migration testing")
+
+                    if psql_available:
+                        # ── Run migration_exec ──────
+                        print(f"\n  ▶ Executing migrations...")
+                        print(f"  {'─' * 50}")
+
+                        migration_prompt = MIGRATION_EXEC_PROMPT_TEMPLATE.format(
+                            step_number=step_num,
+                            step_title=step["title"],
+                            db_url=target_supabase_db_url,
+                        )
+
+                        migration_result = run_claude_code(
+                            prompt=migration_prompt,
+                            working_dir=project_dir,
+                            system_prompt=MIGRATION_EXEC_SYSTEM_PROMPT,
+                        )
+
+                        # Log with redacted credentials
+                        redacted_migration_prompt = redact_credentials(
+                            migration_prompt, credentials_to_redact
+                        )
+                        log_step(store, run_id, step_num, "migration_exec", "claude_code",
+                                 redacted_migration_prompt, migration_result, build_phase="schema")
+
+                        migration = parse_migration_result(migration_result.text_result)
+
+                        mig_emoji = "✅" if migration["status"] == "SUCCESS" else "❌"
+                        print(f"\n  {mig_emoji} Migration: {migration['status']}")
+                        print(f"     Found: {migration['migrations_found']}, Executed: {migration['migrations_executed']}")
+                        if migration["errors"]:
+                            print(f"     Errors:")
+                            for err in migration["errors"]:
+                                print(f"       • {err}")
+
+                        if migration["status"] == "FAILED":
+                            resolution_count += 1
+                            if resolution_count < MAX_RESOLUTIONS_PER_STEP:
+                                print(f"\n  🔄 Migration failed, retrying step...")
+                                step["instructions"] += (
+                                    f"\n\nMIGRATION EXECUTION FAILED:\n"
+                                    + "\n".join(f"- {e}" for e in migration["errors"])
+                                    + f"\n\nFix the migration SQL so it executes successfully against Postgres."
+                                )
+                                continue  # Re-enter loop, retry implementation
+                            else:
+                                print(f"\n  ❌ Max resolutions reached. Continuing with migration errors.")
+                                completed_descriptions.append(
+                                    f"Step {step_num} ({step['title']}): Completed with migration errors"
+                                )
+                                break
+
+                        # ── Run rls_test if migration succeeded ──────
+                        if target_supabase_url and target_supabase_anon_key:
+                            print(f"\n  ▶ Testing RLS policies...")
+                            print(f"  {'─' * 50}")
+
+                            rls_prompt = RLS_TEST_PROMPT_TEMPLATE.format(
+                                step_number=step_num,
+                                step_title=step["title"],
+                                supabase_url=target_supabase_url,
+                                supabase_anon_key=target_supabase_anon_key,
+                                supabase_service_key=target_supabase_service_key,
+                            )
+
+                            rls_result = run_claude_code(
+                                prompt=rls_prompt,
+                                working_dir=project_dir,
+                                system_prompt=RLS_TEST_SYSTEM_PROMPT,
+                            )
+
+                            # Log with redacted credentials
+                            redacted_rls_prompt = redact_credentials(
+                                rls_prompt, credentials_to_redact
+                            )
+                            log_step(store, run_id, step_num, "rls_test", "claude_code",
+                                     redacted_rls_prompt, rls_result, build_phase="schema")
+
+                            rls = parse_rls_test_result(rls_result.text_result)
+
+                            rls_emoji = {"YES": "✅", "NO": "❌", "PARTIAL": "⚠️", "UNKNOWN": "❓"}.get(
+                                rls["rls_enforced"], "❓"
+                            )
+                            print(f"\n  {rls_emoji} RLS enforced: {rls['rls_enforced']}")
+                            print(f"     Tests: {rls['tests_passed']}/{rls['tests_run']} passed")
+                            if rls["errors"]:
+                                print(f"     Errors:")
+                                for err in rls["errors"]:
+                                    print(f"       • {err}")
+
+                            if rls["status"] == "FAILED" or rls["rls_enforced"] == "NO":
+                                resolution_count += 1
+                                if resolution_count < MAX_RESOLUTIONS_PER_STEP:
+                                    print(f"\n  🔄 RLS test failed, retrying step...")
+                                    step["instructions"] += (
+                                        f"\n\nRLS RUNTIME TEST FAILED:\n"
+                                        + "\n".join(f"- {e}" for e in rls["errors"])
+                                        + f"\n\nFix the RLS policies so they properly restrict access. "
+                                        f"RLS enforcement status: {rls['rls_enforced']}"
+                                    )
+                                    continue  # Re-enter loop, retry implementation
+                                else:
+                                    print(f"\n  ❌ Max resolutions reached. Continuing with RLS issues.")
+                                    completed_descriptions.append(
+                                        f"Step {step_num} ({step['title']}): Completed with RLS issues ({rls['rls_enforced']})"
+                                    )
+                                    break
+
+                # Step fully passed (including runtime if applicable)
                 completed_descriptions.append(
                     f"Step {step_num} ({step['title']}): Completed"
                 )
@@ -955,9 +1334,26 @@ def run_orchestration(
         print("  PHASE 3: SMOKE TEST (Claude Code)")
         print(f"{'=' * 60}")
 
+        # Build credentials section for smoke test
+        credentials_section = ""
+        auth_instructions = ""
+        if target_supabase_url and target_supabase_anon_key:
+            credentials_section = f"""SUPABASE_URL: {target_supabase_url}
+SUPABASE_ANON_KEY: {target_supabase_anon_key}"""
+            if target_supabase_service_key:
+                credentials_section += f"\nSUPABASE_SERVICE_KEY: {target_supabase_service_key}"
+            auth_instructions = """
+If the app has authentication:
+1. Create a test user using the service_role key
+2. Sign in as that user
+3. Verify authenticated features work
+4. Clean up the test user"""
+
         smoke_prompt = SMOKE_TEST_PROMPT_TEMPLATE.format(
             user_prompt=user_prompt,
+            credentials_section=credentials_section,
             completed_steps="\n".join(completed_descriptions) if completed_descriptions else "None",
+            auth_instructions=auth_instructions,
         )
 
         smoke_result = run_claude_code(
@@ -966,16 +1362,20 @@ def run_orchestration(
             system_prompt=SMOKE_TEST_SYSTEM_PROMPT,
         )
 
+        # Log with redacted credentials
+        redacted_smoke_prompt = redact_credentials(smoke_prompt, credentials_to_redact)
         log_step(store, run_id, len(steps) + 1, "smoke_test", "claude_code",
-                 smoke_prompt, smoke_result)
+                 redacted_smoke_prompt, smoke_result)
 
         smoke = parse_smoke_test(smoke_result.text_result)
 
         app_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["app_starts"], "❓")
         test_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭", "NO_TESTS": "⏭"}.get(smoke["tests_pass"], "❓")
+        auth_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["auth_works"], "❓")
 
         print(f"\n  {app_emoji} App starts: {smoke['app_starts']}")
         print(f"  {test_emoji} Tests pass: {smoke['tests_pass']}")
+        print(f"  {auth_emoji} Auth works: {smoke['auth_works']}")
         if smoke["errors"]:
             print(f"  Errors:")
             for err in smoke["errors"]:
@@ -986,6 +1386,8 @@ def run_orchestration(
             run_final_status = "completed_failing"
         elif smoke["tests_pass"] == "NO":
             run_final_status = "completed_tests_failing"
+        elif smoke["auth_works"] == "NO":
+            run_final_status = "completed_auth_failing"
         else:
             run_final_status = "completed"
     else:
@@ -1078,6 +1480,14 @@ def main():
                         help="Max retries per step (default: 2)")
     parser.add_argument("--skip-smoke-test", action="store_true",
                         help="Skip the smoke test phase")
+    parser.add_argument("--supabase-url", default=None,
+                        help="Target Supabase project URL (REST API) for runtime testing")
+    parser.add_argument("--supabase-anon-key", default=None,
+                        help="Target Supabase anon key for runtime testing")
+    parser.add_argument("--supabase-service-key", default=None,
+                        help="Target Supabase service_role key (for auth and admin operations)")
+    parser.add_argument("--supabase-db-url", default=None,
+                        help="Target Supabase Postgres connection string (for migrations)")
     parser.add_argument("--list-runs", action="store_true",
                         help="List all runs")
     parser.add_argument("--claude-model", default=None,
@@ -1119,6 +1529,10 @@ def main():
         resume_run_id=args.resume,
         start_from_step=args.start_step,
         skip_smoke_test=args.skip_smoke_test,
+        target_supabase_url=args.supabase_url,
+        target_supabase_anon_key=args.supabase_anon_key,
+        target_supabase_service_key=args.supabase_service_key,
+        target_supabase_db_url=args.supabase_db_url,
     )
 
 
@@ -1161,5 +1575,77 @@ SUMMARY: App starts but tests fail."""
         assert len(result3["errors"]) == 2
         assert "DATABASE_URL" in result3["errors"][1]
         print("PASS:", result3)
+
+        # Test migration result parsing
+        text4 = """MIGRATIONS_FOUND: 3
+MIGRATIONS_EXECUTED: 3
+STATUS: SUCCESS
+ERRORS:
+SUMMARY: All migrations executed successfully."""
+        result4 = parse_migration_result(text4)
+        assert result4["migrations_found"] == 3
+        assert result4["migrations_executed"] == 3
+        assert result4["status"] == "SUCCESS"
+        assert result4["errors"] == []
+        print("PASS:", result4)
+
+        # Test migration failure parsing
+        text4b = """MIGRATIONS_FOUND: 2
+MIGRATIONS_EXECUTED: 1
+STATUS: FAILED
+ERRORS:
+- relation "users" already exists
+- permission denied for schema public
+SUMMARY: Migration failed on second file."""
+        result4b = parse_migration_result(text4b)
+        assert result4b["status"] == "FAILED"
+        assert len(result4b["errors"]) == 2
+        assert "already exists" in result4b["errors"][0]
+        print("PASS:", result4b)
+
+        # Test RLS test result parsing
+        text5 = """TEST_USER_CREATED: YES
+TESTS_RUN: 5
+TESTS_PASSED: 4
+STATUS: FAILED
+RLS_ENFORCED: PARTIAL
+ERRORS:
+- todos table allows public read
+SUMMARY: RLS mostly enforced, but todos readable by anyone."""
+        result5 = parse_rls_test_result(text5)
+        assert result5["test_user_created"] == "YES"
+        assert result5["tests_run"] == 5
+        assert result5["tests_passed"] == 4
+        assert result5["status"] == "FAILED"
+        assert result5["rls_enforced"] == "PARTIAL"
+        assert "todos table allows public read" in result5["errors"][0]
+        print("PASS:", result5)
+
+        # Test smoke test with auth
+        text6 = """APP_STARTS: YES
+TESTS_PASS: YES
+AUTH_WORKS: NO
+ERRORS:
+- Sign-in returns 400 Bad Request
+SUMMARY: App works but auth is broken."""
+        result6 = parse_smoke_test(text6)
+        assert result6["app_starts"] == "YES"
+        assert result6["tests_pass"] == "YES"
+        assert result6["auth_works"] == "NO"
+        assert "400" in result6["errors"][0]
+        print("PASS:", result6)
+
+        # Test credential redaction
+        test_creds = {
+            "supabase_url": "https://abc.supabase.co",
+            "supabase_anon_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        }
+        test_text = "URL: https://abc.supabase.co, KEY: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        redacted = redact_credentials(test_text, test_creds)
+        assert "https://abc.supabase.co" not in redacted
+        assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in redacted
+        assert "***REDACTED***" in redacted
+        print("PASS: credential redaction works")
+
         sys.exit(0)
     main()
