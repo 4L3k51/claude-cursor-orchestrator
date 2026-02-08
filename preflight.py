@@ -11,9 +11,23 @@ Usage:
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+    DOTENV_AVAILABLE = True
+except ImportError:
+    DOTENV_AVAILABLE = False
+
+try:
+    from supabase import create_client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    SUPABASE_AVAILABLE = False
 
 
 def check(label: str, condition: bool, fix: str = ""):
@@ -23,6 +37,62 @@ def check(label: str, condition: bool, fix: str = ""):
     if not condition and fix:
         print(f"     Fix: {fix}")
     return condition
+
+
+REQUIRED_SCHEMA = {
+    "orchestrator_runs": ["run_id", "user_prompt", "project_dir", "status", "created_at", "finished_at"],
+    "orchestrator_steps": [
+        "id", "run_id", "step_number", "phase", "tool", "prompt_sent",
+        "raw_stdout", "raw_stderr", "parsed_result", "exit_code",
+        "duration_seconds", "build_phase", "timestamp", "commands_executed"
+    ],
+    "orchestrator_events": ["id", "run_id", "step_id", "event_type", "event_data", "timestamp"],
+}
+
+
+def check_supabase_schema(supabase_url: str, supabase_key: str) -> tuple[bool, list[str]]:
+    """Check if Supabase schema has all required tables and columns.
+
+    Returns (all_ok, list of missing items).
+    """
+    if not SUPABASE_AVAILABLE:
+        return False, ["supabase Python package not installed"]
+
+    try:
+        client = create_client(supabase_url, supabase_key)
+        missing = []
+
+        # Test each table by selecting its required columns
+        for table, columns in REQUIRED_SCHEMA.items():
+            try:
+                # Try to select all required columns (limit 0 to avoid fetching data)
+                col_list = ", ".join(columns)
+                client.table(table).select(col_list).limit(0).execute()
+            except Exception as e:
+                error_msg = str(e)
+                if "relation" in error_msg and "does not exist" in error_msg:
+                    missing.append(f"Table '{table}' not found")
+                elif "column" in error_msg and "does not exist" in error_msg:
+                    # Extract column name from error like: column "foo" does not exist
+                    match = re.search(r"column ['\"]?(\w+)['\"]? .* does not exist", error_msg)
+                    if match:
+                        missing.append(f"Column '{table}.{match.group(1)}' not found")
+                    else:
+                        missing.append(f"Column missing in '{table}': {error_msg[:80]}")
+                elif "Could not find" in error_msg and "column" in error_msg:
+                    # PostgREST error format: Could not find the 'foo' column
+                    match = re.search(r"Could not find the '(\w+)' column", error_msg)
+                    if match:
+                        missing.append(f"Column '{table}.{match.group(1)}' not found")
+                    else:
+                        missing.append(f"Column missing in '{table}': {error_msg[:80]}")
+                else:
+                    missing.append(f"Error checking '{table}': {error_msg[:80]}")
+
+        return len(missing) == 0, missing
+
+    except Exception as e:
+        return False, [f"Could not connect to Supabase: {str(e)[:100]}"]
 
 
 def run_cmd(cmd: list[str], timeout: int = 15) -> tuple[int, str, str]:
@@ -157,6 +227,35 @@ def main():
         print("  ⚠️  supabase CLI not found (optional)")
         print("     Edge Function deployment will be unavailable")
         print("     Install: brew install supabase/tap/supabase")
+
+    # ── Supabase Schema Check ──
+    print("\n  Supabase Schema:")
+
+    # Load .env file
+    if DOTENV_AVAILABLE:
+        env_file = Path(__file__).parent / ".env"
+        if env_file.exists():
+            load_dotenv(env_file)
+
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("  ⚠️  SUPABASE_URL or SUPABASE_KEY not set in .env")
+        print("     Schema check skipped - configure .env to enable logging")
+    elif not SUPABASE_AVAILABLE:
+        print("  ⚠️  supabase Python package not installed")
+        print("     Run: pip install supabase")
+    else:
+        schema_ok, missing = check_supabase_schema(supabase_url, supabase_key)
+        if schema_ok:
+            check("All required tables and columns exist", True)
+        else:
+            all_ok &= check("Schema up to date", False, "Run migration.sql in Supabase SQL Editor")
+            for item in missing[:5]:  # Show first 5 missing items
+                print(f"       - {item}")
+            if len(missing) > 5:
+                print(f"       ... and {len(missing) - 5} more")
 
     # ── Project directory ──
     print("\n  Environment:")
