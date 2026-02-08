@@ -911,6 +911,41 @@ def check_psql_available() -> bool:
         return False
 
 
+def write_env_local(
+    project_dir: str,
+    supabase_url: Optional[str],
+    supabase_anon_key: Optional[str],
+    supabase_service_key: Optional[str],
+    supabase_db_url: Optional[str],
+    silent: bool = False,
+) -> bool:
+    """Write .env.local with Supabase credentials. Returns True if written."""
+    if not (supabase_url or supabase_anon_key):
+        return False
+
+    env_local_path = os.path.join(project_dir, ".env.local")
+    env_lines = []
+    if supabase_url:
+        env_lines.append(f"NEXT_PUBLIC_SUPABASE_URL={supabase_url}")
+        env_lines.append(f"VITE_SUPABASE_URL={supabase_url}")
+        env_lines.append(f"SUPABASE_URL={supabase_url}")
+    if supabase_anon_key:
+        env_lines.append(f"NEXT_PUBLIC_SUPABASE_ANON_KEY={supabase_anon_key}")
+        env_lines.append(f"VITE_SUPABASE_ANON_KEY={supabase_anon_key}")
+        env_lines.append(f"SUPABASE_ANON_KEY={supabase_anon_key}")
+    if supabase_service_key:
+        env_lines.append(f"SUPABASE_SERVICE_ROLE_KEY={supabase_service_key}")
+    if supabase_db_url:
+        env_lines.append(f"DATABASE_URL={supabase_db_url}")
+
+    with open(env_local_path, "w") as f:
+        f.write("\n".join(env_lines) + "\n")
+
+    if not silent:
+        print(f"  Created .env.local with target Supabase credentials")
+    return True
+
+
 # ─────────────────────────────────────────────
 # Logging helpers
 # ─────────────────────────────────────────────
@@ -972,25 +1007,13 @@ def run_orchestration(
     os.makedirs(project_dir, exist_ok=True)
 
     # Write target Supabase credentials to .env.local if provided
-    if target_supabase_url or target_supabase_anon_key:
-        env_local_path = os.path.join(project_dir, ".env.local")
-        env_lines = []
-        if target_supabase_url:
-            env_lines.append(f"NEXT_PUBLIC_SUPABASE_URL={target_supabase_url}")
-            env_lines.append(f"VITE_SUPABASE_URL={target_supabase_url}")
-            env_lines.append(f"SUPABASE_URL={target_supabase_url}")
-        if target_supabase_anon_key:
-            env_lines.append(f"NEXT_PUBLIC_SUPABASE_ANON_KEY={target_supabase_anon_key}")
-            env_lines.append(f"VITE_SUPABASE_ANON_KEY={target_supabase_anon_key}")
-            env_lines.append(f"SUPABASE_ANON_KEY={target_supabase_anon_key}")
-        if target_supabase_service_key:
-            env_lines.append(f"SUPABASE_SERVICE_ROLE_KEY={target_supabase_service_key}")
-        if target_supabase_db_url:
-            env_lines.append(f"DATABASE_URL={target_supabase_db_url}")
-
-        with open(env_local_path, "w") as f:
-            f.write("\n".join(env_lines) + "\n")
-        print(f"  Created .env.local with target Supabase credentials")
+    write_env_local(
+        project_dir,
+        target_supabase_url,
+        target_supabase_anon_key,
+        target_supabase_service_key,
+        target_supabase_db_url,
+    )
 
     run_id = resume_run_id or str(uuid.uuid4())[:8]
 
@@ -1087,6 +1110,16 @@ def run_orchestration(
 
             log_step(store, run_id, step_num, "implement", "cursor",
                      impl_prompt, impl_result, build_phase=step.get("build_phase"))
+
+            # Re-write .env.local after Cursor (it often overwrites with placeholders)
+            write_env_local(
+                project_dir,
+                target_supabase_url,
+                target_supabase_anon_key,
+                target_supabase_service_key,
+                target_supabase_db_url,
+                silent=True,  # Don't print every time
+            )
 
             if impl_result.exit_code != 0 and not impl_result.text_result:
                 print(f"\n  ⚠️  Cursor failed (exit code {impl_result.exit_code})")
