@@ -838,113 +838,59 @@ def extract_normalized_errors(
     stderr: str,
     parsed_result: str,
     parsed_errors: list[str],
+    commands_executed: list[dict] = None,
 ) -> list[dict]:
     """Extract and normalize errors from step outputs.
 
-    Returns a list of error records:
-    [{"type": "RLS_ERROR", "message": "...", "source": "stderr", "phase": "...", "tool": "..."}, ...]
+    Simple, high-signal approach:
+    - PARSED_ERROR: Explicit errors from AI output (lines starting with "- ")
+    - EXIT_ERROR: Process failed (exit_code != 0), includes stderr tail and commands for context
+
+    Returns a list of error records.
     """
     errors = []
 
-    # Helper to classify error type based on message content
-    def classify_error(msg: str) -> str:
-        msg_lower = msg.lower()
-        if any(k in msg_lower for k in ["pgrst", "permission denied", "rls", "policy"]):
-            return "RLS_ERROR"
-        if any(k in msg_lower for k in ["grant", "role", "authenticated"]):
-            return "GRANT_ERROR"
-        if any(k in msg_lower for k in ["syntax error", "parse error", "unexpected token"]):
-            return "SYNTAX_ERROR"
-        if any(k in msg_lower for k in ["cannot find module", "module not found", "no such file"]):
-            return "IMPORT_ERROR"
-        if any(k in msg_lower for k in ["type error", "typescript", "is not assignable"]):
-            return "TYPE_ERROR"
-        if any(k in msg_lower for k in ["build failed", "compilation failed", "esbuild"]):
-            return "BUILD_ERROR"
-        if any(k in msg_lower for k in ["timeout", "timed out"]):
-            return "TIMEOUT_ERROR"
-        if any(k in msg_lower for k in ["connection refused", "econnrefused", "network"]):
-            return "NETWORK_ERROR"
-        if any(k in msg_lower for k in ["already exists", "duplicate"]):
-            return "DUPLICATE_ERROR"
-        if any(k in msg_lower for k in ["not found", "404", "does not exist"]):
-            return "NOT_FOUND_ERROR"
-        if any(k in msg_lower for k in ["unauthorized", "401", "403", "forbidden"]):
-            return "AUTH_ERROR"
-        if any(k in msg_lower for k in ["500", "internal server", "failed"]):
-            return "SERVER_ERROR"
-        return "UNKNOWN_ERROR"
-
-    # Helper to extract file/line from error message
-    def extract_location(msg: str) -> dict:
-        location = {}
-        # Pattern: /path/to/file.ts:42:10 or file.ts(42,10)
-        import re
-        # Node/TS style: /path/file.ts:42:10
-        match = re.search(r'([/\w.-]+\.[a-z]+):(\d+)(?::(\d+))?', msg)
-        if match:
-            location["file"] = match.group(1)
-            location["line"] = int(match.group(2))
-            if match.group(3):
-                location["column"] = int(match.group(3))
-        # Postgres style: at line 42
-        if not location:
-            match = re.search(r'at line (\d+)', msg, re.IGNORECASE)
-            if match:
-                location["line"] = int(match.group(1))
-        # Error code extraction (PGRST301, TS2345, etc.)
-        code_match = re.search(r'\b(PGRST\d+|TS\d+|E\d+)\b', msg)
-        if code_match:
-            location["code"] = code_match.group(1)
-        return location
-
-    # Process stderr if present
-    if stderr and stderr.strip():
-        for line in stderr.split("\n"):
-            line = line.strip()
-            if line and any(k in line.lower() for k in ["error", "fail", "exception", "pgrst"]):
-                error = {
-                    "type": classify_error(line),
-                    "message": line[:500],  # Truncate long messages
-                    "source": "stderr",
-                    "phase": phase,
-                    "tool": tool,
-                }
-                error.update(extract_location(line))
-                errors.append(error)
-
-    # Process parsed errors from AI output
+    # 1. Include all parsed errors (from AI's explicit "- error" lines)
     for err_msg in parsed_errors:
-        error = {
-            "type": classify_error(err_msg),
-            "message": err_msg[:500],
+        errors.append({
+            "type": "PARSED_ERROR",
+            "message": err_msg[:500],  # Truncate long messages
             "source": "parsed",
             "phase": phase,
             "tool": tool,
-        }
-        error.update(extract_location(err_msg))
-        errors.append(error)
+        })
 
-    # If exit_code != 0 but no errors found, add a generic one
-    if exit_code != 0 and not errors:
-        errors.append({
+    # 2. If exit_code != 0, add EXIT_ERROR with stderr context and commands
+    if exit_code != 0:
+        # Get last 10 lines of stderr for context (no filtering)
+        stderr_tail = None
+        if stderr and stderr.strip():
+            lines = stderr.strip().split("\n")
+            stderr_tail = "\n".join(lines[-10:])[:1000]  # Last 10 lines, max 1000 chars
+
+        # Include commands that were executed (helps debug which one failed)
+        commands_run = None
+        if commands_executed:
+            # Get last 5 commands, just the command strings
+            recent_cmds = commands_executed[-5:]
+            commands_run = [cmd.get("command", str(cmd))[:200] for cmd in recent_cmds]
+
+        error = {
             "type": "EXIT_ERROR",
             "message": f"Process exited with code {exit_code}",
             "source": "exit_code",
             "phase": phase,
             "tool": tool,
             "code": str(exit_code),
-        })
+        }
+        if stderr_tail:
+            error["stderr_tail"] = stderr_tail
+        if commands_run:
+            error["commands_run"] = commands_run
 
-    # Deduplicate by message
-    seen = set()
-    unique_errors = []
-    for err in errors:
-        if err["message"] not in seen:
-            seen.add(err["message"])
-            unique_errors.append(err)
+        errors.append(error)
 
-    return unique_errors
+    return errors
 
 
 def extract_commands_from_events(events: list[dict]) -> list[dict]:
@@ -1396,6 +1342,7 @@ def log_step(store: SupabaseStorage, run_id: str, step_number: int,
         stderr=result.stderr or "",
         parsed_result=result.text_result or "",
         parsed_errors=parsed_errors or [],
+        commands_executed=commands_executed,
     )
 
     # Redact credentials from all text fields
