@@ -121,9 +121,84 @@ python preflight.py
 # Simple test
 python orchestrator.py "Create a simple Node.js hello world project"
 
-# Real build
-python orchestrator.py "Build a Supabase todo app with email auth, RLS policies per user, and a React frontend"
+# Real build with runtime testing
+python orchestrator.py \
+  --supabase-url "https://yourproject.supabase.co" \
+  --supabase-anon-key "your-anon-key" \
+  --supabase-service-key "your-service-key" \
+  --supabase-db-url "postgresql://..." \
+  --supabase-project-ref "yourproject" \
+  "Build a Supabase todo app with email auth, RLS policies per user, and a React frontend"
 ```
+
+## CLI Arguments
+
+### Tool Selection
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--planner` | `claude` | Tool for planning (`claude` or `cursor`) |
+| `--implementer` | `cursor` | Tool for implementation (`claude` or `cursor`) |
+
+```bash
+# All Claude (no Cursor)
+python orchestrator.py --planner claude --implementer claude "Build X"
+
+# Default: Claude plans, Cursor implements
+python orchestrator.py "Build X"
+```
+
+### Model Selection
+
+| Argument | Description |
+|----------|-------------|
+| `--claude-model` | Model for Claude Code (planner/verifier) |
+| `--cursor-model` | Model for Cursor Agent (implementer) |
+
+**Claude Code models:**
+- Aliases: `sonnet`, `opus`, `haiku`
+- Full names: `claude-sonnet-4-5-20250929`, `claude-opus-4-6`, etc.
+
+**Cursor Agent models** (run `agent --help` for your available models):
+
+| Slug | Model |
+|------|-------|
+| `sonnet-4.5` | Claude 4.5 Sonnet |
+| `opus-4.6` | Claude 4.6 Opus |
+| `opus-4.6-thinking` | Claude 4.6 Opus (Thinking) |
+| `sonnet-4.5-thinking` | Claude 4.5 Sonnet (Thinking) |
+| `gpt-5.2` | GPT-5.2 |
+| `gemini-3-pro` | Gemini 3 Pro |
+| `auto` | Auto-select |
+
+```bash
+python orchestrator.py \
+  --claude-model sonnet \
+  --cursor-model sonnet-4.5 \
+  "Build X"
+```
+
+### Supabase Target (Runtime Testing)
+
+These enable migration execution, RLS testing, and Edge Function deployment against a live Supabase project:
+
+| Argument | Description |
+|----------|-------------|
+| `--supabase-url` | Project REST API URL |
+| `--supabase-anon-key` | Anonymous key |
+| `--supabase-service-key` | Service role key (for admin operations) |
+| `--supabase-db-url` | Postgres connection string (for migrations) |
+| `--supabase-project-ref` | Project ref (enables `supabase` CLI linking) |
+
+### Other Options
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--max-retries` | `2` | Max retries per step before giving up |
+| `--skip-smoke-test` | `false` | Skip the final smoke test phase |
+| `--resume` | - | Resume a previous run by run_id |
+| `--start-step` | `1` | Start from a specific step (with `--resume`) |
+| `--list-runs` | - | List all previous runs |
 
 ## Querying Logs
 

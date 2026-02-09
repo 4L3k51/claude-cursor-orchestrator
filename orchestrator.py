@@ -126,6 +126,16 @@ def run_cursor_agent(
     return _run_cli(cmd, working_dir, timeout, idle_timeout=CURSOR_IDLE_TIMEOUT)
 
 
+def run_tool(tool: str, prompt: str, working_dir: str, system_prompt: Optional[str] = None, **kwargs) -> CLIResult:
+    """Dispatch to claude or cursor based on tool name."""
+    if tool == "claude":
+        return run_claude_code(prompt, working_dir, system_prompt=system_prompt, **kwargs)
+    elif tool == "cursor":
+        return run_cursor_agent(prompt, working_dir, **kwargs)
+    else:
+        raise ValueError(f"Unknown tool: {tool}")
+
+
 def _run_cli(
     cmd: list[str],
     working_dir: str,
@@ -1406,6 +1416,8 @@ def run_orchestration(
     resume_run_id: Optional[str] = None,
     start_from_step: Optional[int] = None,
     skip_smoke_test: bool = False,
+    planner_tool: str = "claude",
+    implementer_tool: str = "cursor",
     target_supabase_url: Optional[str] = None,
     target_supabase_anon_key: Optional[str] = None,
     target_supabase_service_key: Optional[str] = None,
@@ -1454,18 +1466,14 @@ def run_orchestration(
 
     # ── Phase 1: Planning ──────────────────────────
     print("=" * 60)
-    print("  PHASE 1: PLANNING (Claude Code)")
+    print(f"  PHASE 1: PLANNING ({planner_tool})")
     print("=" * 60)
 
     plan_prompt = f"Create a step-by-step implementation plan for:\n\n{user_prompt}"
 
-    plan_result = run_claude_code(
-        prompt=plan_prompt,
-        working_dir=project_dir,
-        system_prompt=PLANNER_SYSTEM_PROMPT,
-    )
+    plan_result = run_tool(planner_tool, plan_prompt, project_dir, system_prompt=PLANNER_SYSTEM_PROMPT)
 
-    log_step(store, run_id, 0, "plan", "claude_code", plan_prompt, plan_result)
+    log_step(store, run_id, 0, "plan", planner_tool, plan_prompt, plan_result)
 
     if plan_result.exit_code != 0 and not plan_result.text_result:
         print(f"\n❌ Planning failed! Exit code: {plan_result.exit_code}")
@@ -1534,7 +1542,7 @@ def run_orchestration(
         print(f"{'=' * 60}")
 
         while resolution_count < MAX_RESOLUTIONS_PER_STEP:
-            # ── 2a: Implement with Cursor ──────────
+            # ── 2a: Implement ──────────
             print(f"\n  ▶ Implementing (retry {retry_count}, resolution {resolution_count + 1}/{MAX_RESOLUTIONS_PER_STEP})...")
             print(f"  {'─' * 50}")
 
@@ -1547,12 +1555,9 @@ def run_orchestration(
                 completed_steps="\n".join(completed_descriptions) if completed_descriptions else "None yet",
             )
 
-            impl_result = run_cursor_agent(
-                prompt=impl_prompt,
-                working_dir=project_dir,
-            )
+            impl_result = run_tool(implementer_tool, impl_prompt, project_dir)
 
-            log_step(store, run_id, step_num, "implement", "cursor",
+            log_step(store, run_id, step_num, "implement", implementer_tool,
                      impl_prompt, impl_result, build_phase=step.get("build_phase"))
 
             # Re-write .env.local after Cursor (it often overwrites with placeholders)
@@ -2137,6 +2142,10 @@ def main():
                         help="Max retries per step (default: 2)")
     parser.add_argument("--skip-smoke-test", action="store_true",
                         help="Skip the smoke test phase")
+    parser.add_argument("--planner", choices=["claude", "cursor"], default="claude",
+                        help="Tool for planning (default: claude)")
+    parser.add_argument("--implementer", choices=["claude", "cursor"], default="cursor",
+                        help="Tool for implementation (default: cursor)")
     parser.add_argument("--supabase-url", default=None,
                         help="Target Supabase project URL (REST API) for runtime testing")
     parser.add_argument("--supabase-anon-key", default=None,
@@ -2188,6 +2197,8 @@ def main():
         resume_run_id=args.resume,
         start_from_step=args.start_step,
         skip_smoke_test=args.skip_smoke_test,
+        planner_tool=args.planner,
+        implementer_tool=args.implementer,
         target_supabase_url=args.supabase_url,
         target_supabase_anon_key=args.supabase_anon_key,
         target_supabase_service_key=args.supabase_service_key,
