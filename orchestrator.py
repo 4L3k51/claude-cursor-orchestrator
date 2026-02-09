@@ -483,6 +483,7 @@ RULES:
 - If Supabase credentials are provided:
   - Test authentication flow (sign up, sign in)
   - Make authenticated API requests to verify the full stack works
+  - If Storage is used: try uploading a small test file and verify it succeeds
 - Kill any long-running processes after testing (don't leave servers running)
 - Report what worked and what didn't
 
@@ -490,6 +491,7 @@ FORMAT your response as:
 APP_STARTS: YES | NO | N/A
 TESTS_PASS: YES | NO | N/A | NO_TESTS
 AUTH_WORKS: YES | NO | N/A
+STORAGE_WORKS: YES | NO | N/A
 ERRORS (if any):
 - [error 1]
 - [error 2]
@@ -570,6 +572,7 @@ RULES:
   2. Authenticated users can only see their own data (catches missing RLS policies)
   3. Unauthenticated requests (anon key only, no JWT) are properly blocked
 - Watch for PGRST301 errors ("permission denied" or "No suitable key") - these indicate missing GRANTs
+- If triggers exist: after INSERT/UPDATE, check if expected side effects occurred (e.g., updated_at changed, audit log created)
 - Clean up the test user when done
 
 TEST PATTERN (use curl):
@@ -589,6 +592,7 @@ TESTS_PASSED: [number]
 STATUS: SUCCESS | FAILED
 RLS_ENFORCED: YES | NO | PARTIAL
 GRANTS_VALID: YES | NO
+TRIGGERS_WORK: YES | NO | N/A
 ERRORS (if any):
 - [error 1]
 - [error 2]
@@ -918,6 +922,7 @@ def parse_smoke_test(smoke_text: str) -> dict:
         "app_starts": "UNKNOWN",
         "tests_pass": "UNKNOWN",
         "auth_works": "UNKNOWN",
+        "storage_works": "UNKNOWN",
         "errors": [],
         "summary": "",
     }
@@ -954,6 +959,15 @@ def parse_smoke_test(smoke_text: str) -> dict:
                 result["auth_works"] = "NO"
             elif "N/A" in val:
                 result["auth_works"] = "N/A"
+
+        elif upper.startswith("STORAGE_WORKS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                result["storage_works"] = "YES"
+            elif "NO" in val and "N/A" not in val:
+                result["storage_works"] = "NO"
+            elif "N/A" in val:
+                result["storage_works"] = "N/A"
 
         elif upper.startswith("SUMMARY:"):
             result["summary"] = stripped.split(":", 1)[1].strip()
@@ -1063,6 +1077,7 @@ def parse_rls_test_result(rls_text: str) -> dict:
         "status": "UNKNOWN",
         "rls_enforced": "UNKNOWN",
         "grants_valid": "UNKNOWN",
+        "triggers_work": "UNKNOWN",
         "errors": [],
         "summary": "",
     }
@@ -1098,6 +1113,14 @@ def parse_rls_test_result(rls_text: str) -> dict:
         elif upper.startswith("GRANTS_VALID:"):
             val = stripped.split(":", 1)[1].strip().upper()
             result["grants_valid"] = "YES" if "YES" in val else "NO"
+        elif upper.startswith("TRIGGERS_WORK:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                result["triggers_work"] = "YES"
+            elif "NO" in val and "N/A" not in val:
+                result["triggers_work"] = "NO"
+            elif "N/A" in val:
+                result["triggers_work"] = "N/A"
         elif upper.startswith("SUMMARY:"):
             result["summary"] = stripped.split(":", 1)[1].strip()
         elif stripped.startswith("- "):
@@ -1595,8 +1618,12 @@ def run_orchestration(
                             grants_emoji = {"YES": "✅", "NO": "❌", "UNKNOWN": "❓"}.get(
                                 rls["grants_valid"], "❓"
                             )
+                            triggers_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭", "UNKNOWN": "❓"}.get(
+                                rls["triggers_work"], "❓"
+                            )
                             print(f"\n  {rls_emoji} RLS enforced: {rls['rls_enforced']}")
                             print(f"  {grants_emoji} GRANTs valid: {rls['grants_valid']}")
+                            print(f"  {triggers_emoji} Triggers work: {rls['triggers_work']}")
                             print(f"     Tests: {rls['tests_passed']}/{rls['tests_run']} passed")
                             if rls["errors"]:
                                 print(f"     Errors:")
@@ -1862,10 +1889,12 @@ If the app has authentication:
         app_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["app_starts"], "❓")
         test_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭", "NO_TESTS": "⏭"}.get(smoke["tests_pass"], "❓")
         auth_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["auth_works"], "❓")
+        storage_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["storage_works"], "❓")
 
         print(f"\n  {app_emoji} App starts: {smoke['app_starts']}")
         print(f"  {test_emoji} Tests pass: {smoke['tests_pass']}")
         print(f"  {auth_emoji} Auth works: {smoke['auth_works']}")
+        print(f"  {storage_emoji} Storage works: {smoke['storage_works']}")
         if smoke["errors"]:
             print(f"  Errors:")
             for err in smoke["errors"]:
