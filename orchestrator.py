@@ -786,38 +786,96 @@ def strip_markdown(text: str) -> str:
 
 
 def parse_plan(plan_text: str) -> list[dict]:
-    """Parse the planner's output into structured steps."""
+    """Parse the planner's output into structured steps.
+
+    Supports multiple formats:
+    - Claude format: "STEP N: Title" with "PHASE: xxx"
+    - GPT/Markdown format: "### N) Title" or "## N. Title"
+    - Numbered list format: "N. Title" or "N) Title"
+    """
+    import re
+
     steps = []
     current_step = None
     current_body = []
 
+    # Patterns for step headers (order matters - more specific first)
+    step_patterns = [
+        # "STEP N:" format (Claude style)
+        re.compile(r'^STEP\s+(\d+)\s*[:\-]\s*(.*)$', re.IGNORECASE),
+        # "### N)" or "## N)" format (GPT/Markdown style with parenthesis)
+        re.compile(r'^#{1,4}\s*(\d+)\)\s*(.*)$'),
+        # "### N." or "## N." format (GPT/Markdown style with period)
+        re.compile(r'^#{1,4}\s*(\d+)\.\s*(.*)$'),
+        # "### Step N:" format (hybrid)
+        re.compile(r'^#{1,4}\s*Step\s+(\d+)\s*[:\-]\s*(.*)$', re.IGNORECASE),
+        # "N)" at start of line (numbered list with paren)
+        re.compile(r'^(\d+)\)\s+(.+)$'),
+        # "N." at start of line (numbered list with period) - only if title follows
+        re.compile(r'^(\d+)\.\s+([A-Z].+)$'),
+    ]
+
+    def match_step_header(line: str):
+        """Try to match line against step header patterns."""
+        for pattern in step_patterns:
+            match = pattern.match(line)
+            if match:
+                try:
+                    step_num = int(match.group(1))
+                    title = match.group(2).strip() if match.group(2) else ""
+                    return step_num, title
+                except (ValueError, IndexError):
+                    continue
+        return None, None
+
+    def infer_build_phase(title: str, instructions: str) -> str:
+        """Infer build phase from step title and content."""
+        text = (title + " " + instructions).lower()
+
+        # Keywords for each phase
+        phase_keywords = {
+            "setup": ["setup", "initialize", "create project", "install", "scaffold", "npm init", "create-next-app", "environment"],
+            "schema": ["schema", "database", "table", "migration", "rls", "row level", "policy", "policies", "sql", "postgres", "supabase table"],
+            "backend": ["api", "endpoint", "server", "function", "edge function", "backend", "authentication", "auth flow", "realtime"],
+            "frontend": ["frontend", "ui", "component", "page", "react", "next.js", "tailwind", "styling", "layout", "form"],
+            "testing": ["test", "testing", "verify", "check", "validation", "e2e", "unit test"],
+            "deployment": ["deploy", "deployment", "vercel", "production", "hosting", "ci/cd", "environment variable"],
+        }
+
+        for phase, keywords in phase_keywords.items():
+            if any(kw in text for kw in keywords):
+                return phase
+        return None
+
     for line in plan_text.split("\n"):
         stripped = strip_markdown(line.strip())
 
-        # Match "STEP N:" pattern
-        if stripped.upper().startswith("STEP ") and ":" in stripped:
+        # Skip empty lines and meta lines
+        if stripped.upper().startswith("TOTAL_STEPS:"):
+            continue
+
+        # Try to match step header
+        step_num, title = match_step_header(stripped)
+
+        if step_num is not None:
             # Save previous step
             if current_step is not None:
+                instructions = "\n".join(current_body).strip()
+                # If no explicit phase, try to infer it
+                if current_step.get("build_phase") is None:
+                    current_step["build_phase"] = infer_build_phase(current_step["title"], instructions)
                 steps.append({
                     "number": current_step["number"],
                     "title": current_step["title"],
-                    "instructions": "\n".join(current_body).strip(),
+                    "instructions": instructions,
                     "build_phase": current_step.get("build_phase"),
                 })
 
-            # Parse new step
-            parts = stripped.split(":", 1)
-            try:
-                step_num = int(parts[0].upper().replace("STEP", "").strip())
-            except ValueError:
-                continue
-            title = parts[1].strip() if len(parts) > 1 else ""
             current_step = {"number": step_num, "title": title, "build_phase": None}
             current_body = []
 
-        elif stripped.upper().startswith("TOTAL_STEPS:"):
-            continue  # Skip this meta line
         elif current_step is not None:
+            # Check for explicit PHASE: line
             if stripped.upper().startswith("PHASE:"):
                 phase_val = stripped.split(":", 1)[1].strip().lower()
                 valid_phases = {"setup", "schema", "backend", "frontend", "testing", "deployment"}
@@ -828,10 +886,13 @@ def parse_plan(plan_text: str) -> list[dict]:
 
     # Don't forget the last step
     if current_step is not None:
+        instructions = "\n".join(current_body).strip()
+        if current_step.get("build_phase") is None:
+            current_step["build_phase"] = infer_build_phase(current_step["title"], instructions)
         steps.append({
             "number": current_step["number"],
             "title": current_step["title"],
-            "instructions": "\n".join(current_body).strip(),
+            "instructions": instructions,
             "build_phase": current_step.get("build_phase"),
         })
 
