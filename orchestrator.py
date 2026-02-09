@@ -476,6 +476,7 @@ that the completed project actually runs.
 
 RULES:
 - Look at the project files to determine what kind of project this is (Node.js, Python, etc.)
+- Run the build command first (npm run build, next build, etc.) to catch TypeScript/compilation errors
 - Find and run the appropriate start command (npm start, npm run dev, python main.py, etc.)
 - If a test suite exists (npm test, pytest, etc.), run it
 - Let the app start, wait a few seconds, then check if it's still running or crashed
@@ -488,6 +489,7 @@ RULES:
 - Report what worked and what didn't
 
 FORMAT your response as:
+BUILD_SUCCEEDS: YES | NO | N/A
 APP_STARTS: YES | NO | N/A
 TESTS_PASS: YES | NO | N/A | NO_TESTS
 AUTH_WORKS: YES | NO | N/A
@@ -919,6 +921,7 @@ def parse_verification(verify_text: str) -> dict:
 def parse_smoke_test(smoke_text: str) -> dict:
     """Parse the smoke tester's output into structured result."""
     result = {
+        "build_succeeds": "UNKNOWN",
         "app_starts": "UNKNOWN",
         "tests_pass": "UNKNOWN",
         "auth_works": "UNKNOWN",
@@ -931,7 +934,16 @@ def parse_smoke_test(smoke_text: str) -> dict:
         stripped = strip_markdown(line.strip())
         upper = stripped.upper()
 
-        if upper.startswith("APP_STARTS:"):
+        if upper.startswith("BUILD_SUCCEEDS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            if "YES" in val:
+                result["build_succeeds"] = "YES"
+            elif "NO" in val and "N/A" not in val:
+                result["build_succeeds"] = "NO"
+            elif "N/A" in val:
+                result["build_succeeds"] = "N/A"
+
+        elif upper.startswith("APP_STARTS:"):
             val = stripped.split(":", 1)[1].strip().upper()
             if "YES" in val:
                 result["app_starts"] = "YES"
@@ -1888,10 +1900,12 @@ If the app has authentication:
 
         app_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["app_starts"], "❓")
         test_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭", "NO_TESTS": "⏭"}.get(smoke["tests_pass"], "❓")
+        build_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["build_succeeds"], "❓")
         auth_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["auth_works"], "❓")
         storage_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["storage_works"], "❓")
 
-        print(f"\n  {app_emoji} App starts: {smoke['app_starts']}")
+        print(f"\n  {build_emoji} Build succeeds: {smoke['build_succeeds']}")
+        print(f"  {app_emoji} App starts: {smoke['app_starts']}")
         print(f"  {test_emoji} Tests pass: {smoke['tests_pass']}")
         print(f"  {auth_emoji} Auth works: {smoke['auth_works']}")
         print(f"  {storage_emoji} Storage works: {smoke['storage_works']}")
@@ -1901,7 +1915,9 @@ If the app has authentication:
                 print(f"    • {err}")
         print(f"  Summary: {smoke['summary']}")
 
-        if smoke["app_starts"] == "NO":
+        if smoke["build_succeeds"] == "NO":
+            run_final_status = "completed_build_failing"
+        elif smoke["app_starts"] == "NO":
             run_final_status = "completed_failing"
         elif smoke["tests_pass"] == "NO":
             run_final_status = "completed_tests_failing"
