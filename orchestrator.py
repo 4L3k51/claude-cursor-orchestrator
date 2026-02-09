@@ -1226,20 +1226,44 @@ def write_env_local(
 def log_step(store: SupabaseStorage, run_id: str, step_number: int,
              phase: str, tool: str, prompt: str, result: CLIResult,
              build_phase: Optional[str] = None,
-             commands_executed: Optional[list] = None) -> int:
-    """Log a step to storage. Returns step ID."""
+             commands_executed: Optional[list] = None,
+             credentials_to_redact: Optional[dict] = None) -> int:
+    """Log a step to storage. Returns step ID.
+
+    If credentials_to_redact is provided, all text fields will be redacted.
+    """
     if commands_executed is None and result.events:
         commands_executed = extract_commands_from_events(result.events)
+
+    # Redact credentials from all text fields
+    prompt_redacted = prompt
+    stdout_redacted = result.stdout
+    stderr_redacted = result.stderr
+    parsed_redacted = result.text_result
+    events_redacted = result.events
+
+    if credentials_to_redact:
+        prompt_redacted = redact_credentials(prompt, credentials_to_redact)
+        stdout_redacted = redact_credentials(result.stdout, credentials_to_redact) if result.stdout else None
+        stderr_redacted = redact_credentials(result.stderr, credentials_to_redact) if result.stderr else None
+        parsed_redacted = redact_credentials(result.text_result, credentials_to_redact) if result.text_result else None
+
+        # Redact credentials from events (convert to JSON string, redact, parse back)
+        if result.events:
+            import json
+            events_json = json.dumps(result.events)
+            events_json_redacted = redact_credentials(events_json, credentials_to_redact)
+            events_redacted = json.loads(events_json_redacted)
 
     step_id = store.log_step(
         run_id=run_id,
         step_number=step_number,
         phase=phase,
         tool=tool,
-        prompt_sent=prompt,
-        raw_stdout=result.stdout,
-        raw_stderr=result.stderr,
-        parsed_result=result.text_result,
+        prompt_sent=prompt_redacted,
+        raw_stdout=stdout_redacted,
+        raw_stderr=stderr_redacted,
+        parsed_result=parsed_redacted,
         exit_code=result.exit_code,
         duration_seconds=result.duration,
         build_phase=build_phase,
@@ -1247,8 +1271,8 @@ def log_step(store: SupabaseStorage, run_id: str, step_number: int,
     )
 
     # Batch insert events for performance - step must exist first (FK constraint)
-    if result.events and step_id:
-        store.log_events_batch(run_id, step_id, result.events)
+    if events_redacted and step_id:
+        store.log_events_batch(run_id, step_id, events_redacted)
 
     return step_id
 
@@ -1374,13 +1398,12 @@ def run_orchestration(
     psql_checked = False
     psql_available = False
 
-    # Credentials dict for redaction in logs
+    # Credentials dict for redaction in logs (only secrets, not URLs/refs)
     credentials_to_redact = {
-        "supabase_url": target_supabase_url,
         "supabase_anon_key": target_supabase_anon_key,
         "supabase_service_key": target_supabase_service_key,
-        "supabase_db_url": target_supabase_db_url,
-        "supabase_project_ref": target_supabase_project_ref,
+        "supabase_db_url": target_supabase_db_url,  # Contains password
+        "logging_supabase_key": os.environ.get("SUPABASE_KEY"),  # Logging credentials
     }
 
     for idx, step in enumerate(steps[start:], start=start):
