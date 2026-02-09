@@ -135,18 +135,37 @@ python orchestrator.py \
 
 ### Tool Selection
 
+The orchestrator supports **any combination** of Claude Code and Cursor Agent for planning and implementation. The verifier is always Claude Code.
+
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--planner` | `claude` | Tool for planning (`claude` or `cursor`) |
 | `--implementer` | `cursor` | Tool for implementation (`claude` or `cursor`) |
 
+**All 4 configurations:**
+
+| Configuration | Command | Use Case |
+|---------------|---------|----------|
+| Claude plans, Cursor implements | `--planner claude --implementer cursor` (default) | Compare both agents on their strengths |
+| Claude only | `--planner claude --implementer claude` | Baseline without Cursor |
+| Cursor only | `--planner cursor --implementer cursor` | Baseline without Claude |
+| Cursor plans, Claude implements | `--planner cursor --implementer claude` | Test reversed roles |
+
 ```bash
+# Default: Claude plans, Cursor implements
+python orchestrator.py "Build X"
+
 # All Claude (no Cursor)
 python orchestrator.py --planner claude --implementer claude "Build X"
 
-# Default: Claude plans, Cursor implements
-python orchestrator.py "Build X"
+# All Cursor (no Claude Code for planning/implementing)
+python orchestrator.py --planner cursor --implementer cursor "Build X"
+
+# Cursor plans, Claude implements
+python orchestrator.py --planner cursor --implementer claude "Build X"
 ```
+
+This flexibility lets you run the same prompt with different configurations to compare agent performance.
 
 ### Model Selection
 
