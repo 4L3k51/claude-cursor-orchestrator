@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_steps (
     id BIGSERIAL PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES orchestrator_runs(run_id),
     step_number INTEGER NOT NULL,
-    phase TEXT NOT NULL,             -- 'plan', 'implement', 'verify', 'replan'
+    phase TEXT NOT NULL,             -- 'plan', 'implement', 'verify', 'replan_checkpoint', 'migration_exec', 'rls_test', 'edge_function_deploy', 'research', 'diagnostic', 'smoke_test', 'approach_analysis'
     tool TEXT NOT NULL,              -- 'claude_code' or 'cursor'
     prompt_sent TEXT,
     raw_stdout TEXT,                 -- full stdout capture
@@ -152,6 +152,7 @@ SELECT
     COUNT(DISTINCT s.id) FILTER (WHERE s.exit_code != 0) AS error_count,
     COUNT(DISTINCT s.id) FILTER (WHERE s.phase = 'implement') AS impl_attempts,
     COUNT(DISTINCT s.id) FILTER (WHERE s.phase = 'verify') AS verify_count,
+    COUNT(DISTINCT s.id) FILTER (WHERE s.phase = 'replan_checkpoint') AS replan_count,
     SUM(s.duration_seconds) AS total_tool_seconds
 FROM orchestrator_runs r
 LEFT JOIN orchestrator_steps s ON s.run_id = r.run_id
