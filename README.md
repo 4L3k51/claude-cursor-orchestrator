@@ -10,9 +10,9 @@ By logging every step, tool call, verification verdict, and smoke test result, w
 
 - **Knowledge gaps** — which tasks consistently fail? If RLS policy steps fail 8 out of 10 runs with similar errors, that's a gap in training data or documentation, not randomness
 - **Recovery effectiveness** — when the verifier triggers a web search, do the findings actually help the retry succeed? If searches for "supabase realtime" never lead to passing retries, the available docs aren't good enough
-- **Tool & model comparison** — Claude Code and Cursor implement the same steps with the same instructions. You can compare which tool uses more Bash calls, reads more files before editing, or recovers better from failures
+- **Tool & model comparison** — Different agents and models implement the same prompt, letting us compare which ones use more Bash calls, read more files before editing, or recover better from failures.
 
-The actionable output: identify where documentation, examples, or training data need improvement so these tools build correctly.
+The goal output: identify where documentation, examples, or training data need improvement so these tools build correctly.
 
 ## How It Works
 
