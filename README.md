@@ -6,7 +6,7 @@ Observation framework that coordinates **Claude Code** and **Cursor Agents** to 
 
 This is a measurement tool. It answers the question:  **when AI agents are given a task to build an app with Supabase and zero hand-holding, where do they still get things wrong?**
 
-By logging every step, tool call, verification verdict, and smoke test result, you get a structured dataset that shows:
+By logging every step, tool call, verification verdict, and smoke test result, we get a structured dataset that shows:
 
 - **Knowledge gaps** — which tasks consistently fail? If RLS policy steps fail 8 out of 10 runs with similar errors, that's a gap in training data or documentation, not randomness
 - **Recovery effectiveness** — when the verifier triggers a web search, do the findings actually help the retry succeed? If searches for "supabase realtime" never lead to passing retries, the available docs aren't good enough
