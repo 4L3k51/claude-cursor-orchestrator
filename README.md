@@ -14,6 +14,12 @@ By logging every step, tool call, verification verdict, and smoke test result, w
 
 The goal output: identify where documentation, examples, or training data need improvement so these tools build correctly.
 
+## The orchestration balancing act
+
+If the orchestration is too thin — no verification, no RLS testing, no replanning — the agents produce code that looks right but doesn't work, and you can't tell where it broke. If the orchestration is too thick — the system prompt includes the exact SQL, the exact config entries, the exact implementation patterns — the agents just follow instructions and you learn nothing about their actual knowledge.
+
+The goal is enough structure that failures are meaningful, not so much that you're hiding them. The orchestration catches failures and gives agents a chance to recover, but it doesn't prevent failures from happening in the first place. Logging captures every step of this — what failed, how the agent tried to recover, and whether it succeeded. That's the dataset.
+
 ## How It Works
 
 ```
@@ -95,6 +101,7 @@ Everything is stored as JSONB in Supabase and queryable with SQL:
   - `PARSED_ERROR`: explicit errors from AI output
   - `EXIT_ERROR`: non-zero exit code + stderr tail + commands_run
 - **Timing**: duration per step
+
 
 ## License
 
