@@ -273,7 +273,9 @@ def show_timeline(store: SupabaseStorage, run_id: str):
 
     for s in steps:
         phase_icon = {
-            "plan": "📋", "implement": "🔨", "verify": "🔍", "replan": "📝",
+            "plan": "📋", "implement": "🔨", "verify": "🔍", "replan_checkpoint": "🔄",
+            "migration_exec": "🗄️", "rls_test": "🔐", "edge_function_deploy": "⚡",
+            "research": "🔍", "diagnostic": "🩺", "smoke_test": "🧪", "approach_analysis": "📊",
         }.get(s["phase"], "❓")
 
         tool_label = "Claude Code" if s["tool"] == "claude_code" else "Cursor"
@@ -401,10 +403,16 @@ def compare_runs(store: SupabaseStorage, run_id1: str, run_id2: str):
         error_count = sum(1 for s in steps if s.get("exit_code", 0) != 0)
         impl_steps = [s for s in steps if s["phase"] == "implement"]
         verify_steps = [s for s in steps if s["phase"] == "verify"]
+        replan_steps = [s for s in steps if s["phase"] == "replan_checkpoint"]
 
         pass_count = sum(
             1 for s in verify_steps
             if s.get("parsed_result") and "PASS" in (s["parsed_result"] or "").upper()
+        )
+
+        replan_count = sum(
+            1 for s in replan_steps
+            if s.get("parsed_result") and "REPLAN" in (s["parsed_result"] or "").upper()
         )
 
         print(f"\n  Run: {rid}")
@@ -415,6 +423,7 @@ def compare_runs(store: SupabaseStorage, run_id1: str, run_id2: str):
         print(f"    Events: {len(events)}")
         print(f"    Implementation attempts: {len(impl_steps)}")
         print(f"    Verifications passed: {pass_count}/{len(verify_steps)}")
+        print(f"    Replans triggered: {replan_count}/{len(replan_steps)}")
 
 
 # ─────────────────────────────────────────────
@@ -657,10 +666,18 @@ def generate_full_report(store, run_id: str) -> dict:
         "schema_cache_issues": failures_by_category.get("schema_mismatch", 0),
     }
 
+    # Count replans
+    replan_steps = [s for s in steps if s["phase"] == "replan_checkpoint"]
+    replans_triggered = sum(
+        1 for s in replan_steps
+        if s.get("parsed_result") and "REPLAN" in (s.get("parsed_result") or "").upper()
+    )
+
     # Infer tool configuration from steps
     planner_tool = None
     implementer_tool = None
     verifier_tool = None
+    replanner_tool = None
     for s in steps:
         if s["phase"] == "plan" and not planner_tool:
             planner_tool = s["tool"]
@@ -668,6 +685,8 @@ def generate_full_report(store, run_id: str) -> dict:
             implementer_tool = s["tool"]
         elif s["phase"] == "verify" and not verifier_tool:
             verifier_tool = s["tool"]
+        elif s["phase"] == "replan_checkpoint" and not replanner_tool:
+            replanner_tool = s["tool"]
 
     # Extract models from system init events
     models_used = set()
@@ -691,6 +710,7 @@ def generate_full_report(store, run_id: str) -> dict:
             "planner": planner_tool,
             "implementer": implementer_tool,
             "verifier": verifier_tool,
+            "replanner": replanner_tool,
             "models_used": list(models_used),
         },
 
@@ -702,6 +722,8 @@ def generate_full_report(store, run_id: str) -> dict:
             "passed_steps": passed,
             "failed_steps": failed,
             "total_retries": total_retries,
+            "replan_checkpoints": len(replan_steps),
+            "replans_triggered": replans_triggered,
             "success_rate": round(passed / total, 2) if total > 0 else 0,
         },
 
@@ -774,6 +796,7 @@ def generate_analysis_markdown(full_report: dict) -> str:
         f"| Planner | {tc.get('planner', 'unknown')} |",
         f"| Implementer | {tc.get('implementer', 'unknown')} |",
         f"| Verifier | {tc.get('verifier', 'unknown')} |",
+        f"| Replanner | {tc.get('replanner', 'unknown')} |",
         f"",
         f"**Models:** {', '.join(tc.get('models_used', [])) or 'unknown'}",
         f"",
@@ -786,6 +809,7 @@ def generate_analysis_markdown(full_report: dict) -> str:
         f"| Steps | {s['total_steps']} total ({s['passed_steps']} passed, {s['failed_steps']} failed) |",
         f"| Success Rate | {s['success_rate'] * 100:.0f}% |",
         f"| Total Retries | {s['total_retries']} |",
+        f"| Replans | {s.get('replans_triggered', 0)}/{s.get('replan_checkpoints', 0)} triggered |",
         f"",
         f"**Prompt:** {s['prompt']}",
         f"",
