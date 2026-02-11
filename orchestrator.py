@@ -447,6 +447,9 @@ RULES:
 - Run any relevant checks (TypeScript compilation, linting, etc.) if appropriate
 - Be specific about any problems you find
 - .env.local is managed by the pipeline - do not fail based on its credential values
+- If you see an error code or unfamiliar failure pattern, do a quick WebSearch
+  lookup. If you find a solution, include it in SUMMARY and recommend RETRY.
+  If you need deeper research, recommend WEB_SEARCH with a specific query.
 
 FORMAT your response as:
 STATUS: PASS | FAIL | PARTIAL
