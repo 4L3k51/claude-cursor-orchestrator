@@ -56,7 +56,8 @@ You: "Build a Supabase todo app with auth"
   testing, deployment)                                                                                                       
   2. Implement — Agent builds the step                                                                                       
   3. Verify — Agent checks the work and returns a verdict                                                                    
-  4. Resolve — Based on the verdict:                                                                                         
+  4. Resolve — Based on the verdict:
+```                                                                                         
   ┌────────────────┬─────────────────────────────────────────────────────────┐                                               
   │    Verdict     │                      What happens                       │                                               
   ├────────────────┼─────────────────────────────────────────────────────────┤                                               
@@ -72,9 +73,10 @@ You: "Build a Supabase todo app with auth"
   ├────────────────┼─────────────────────────────────────────────────────────┤                                               
   │ MODIFY_PLAN    │ Trigger replan checkpoint                               │                                               
   └────────────────┴─────────────────────────────────────────────────────────┘                                               
-  5. Replan Checkpoint — After step completion, evaluate if remaining steps need adjustment. If implementation diverged,     
+```
+6. Replan Checkpoint — After step completion, evaluate if remaining steps need adjustment. If implementation diverged,     
   regenerate remaining steps. Completed steps stay locked.                                                                   
-  6. Log — Everything goes to Supabase                                                                                       
+  7. Log — Everything goes to Supabase                                                                                       
                                                                                                                              
   Loop controls:                                                                                                             
   - resolution_count — max 5 resolution actions (retry, search, diagnostic) per step                                         
