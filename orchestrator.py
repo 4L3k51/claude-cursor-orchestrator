@@ -1245,9 +1245,10 @@ def needs_replan_checkpoint(
     if verification["recommendation"] == "PROCEED":
         if verification["status"] == "PARTIAL":
             reasons.append(f"partial verification ({verification['summary']})")
-
-        if verification["issues"]:
-            reasons.append(f"{len(verification['issues'])} noted issues")
+            # Only count issues as replan trigger when status is PARTIAL (not PASS)
+            # When status is PASS, issues are often positive observations, not problems
+            if verification["issues"]:
+                reasons.append(f"{len(verification['issues'])} noted issues")
 
     # Runtime test results with any warnings
     if migration_result:
@@ -1917,6 +1918,8 @@ def run_orchestration(
 
             # Pass session_id for retries - lets implementer remember previous attempts
             # (Only works for Claude; Cursor ignores session_id)
+            if step_session_id:
+                print(f"  🔄 Resuming session: {step_session_id[:8]}...")
             impl_result = run_tool(implementer_tool, impl_prompt, project_dir,
                                    session_id=step_session_id)
 
