@@ -20,6 +20,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -52,6 +53,7 @@ CLAUDE_CODE_TIMEOUT = 600   # 10 min for planning/verification
 CURSOR_TIMEOUT = 900        # 15 min for implementation (can be complex)
 CURSOR_IDLE_TIMEOUT = 120   # Kill cursor if no output for 2 min (hanging bug workaround)
 MAX_RESOLUTIONS_PER_STEP = 7  # total resolution actions (search, diagnostic, retry) before giving up
+MAX_SMOKE_TEST_RETRIES = 2    # max fix attempts after smoke test failures
 
 # CLI commands
 CLAUDE_CODE_CMD = "claude"
@@ -390,6 +392,10 @@ RULES:
 - Be specific about file names, function names, and expected behavior
 - Focus on Supabase specifics: schema/migrations, RLS policies, edge functions, auth setup
 - Tag each step with a build phase: setup, schema, backend, frontend, testing, or deployment
+
+TESTING SETUP (include in setup phase):
+- Install Playwright for browser testing: pip install playwright && playwright install chromium
+- This enables automated browser tests for auth, real-time features, and CRUD operations
 
 IDEMPOTENT DDL (critical for retry safety):
 - All SQL migrations MUST be idempotent so they can be safely re-run:
@@ -875,6 +881,78 @@ SUMMARY: {verification_summary}
 
 Evaluate: Are the remaining steps still valid given what was actually built and any noted issues?
 If replanning, the next step number should be {next_step_number}.
+"""
+
+
+# ─────────────────────────────────────────────
+# Browser Test Generation Prompts
+# ─────────────────────────────────────────────
+
+BROWSER_TEST_GEN_SYSTEM_PROMPT = """\
+You are a Playwright test writer. You will examine the built app's codebase to understand
+its actual UI components, selectors, form fields, and routes, then write E2E tests using
+the EXACT selectors from the code.
+
+IMPORTANT:
+- Look at the actual component files to find real button texts, input names, CSS classes
+- Use data-testid attributes if they exist, otherwise use text content or semantic selectors
+- Do NOT guess selectors - find them in the source code
+- The tests will run with pre-created test users (credentials provided in TestContext)
+- Use generous timeouts for real-time propagation (5000ms)
+- Test multi-user real-time scenarios with two browser contexts
+
+You have access to helper functions injected into the test module:
+- TestContext: dataclass with app_url, user credentials, browser contexts
+- ctx.new_page_a() / ctx.new_page_b(): create pages for user A/B
+- create_test_user(supabase_url, service_key, email, password): create test user
+- delete_test_user(supabase_url, service_key, user_id): delete test user
+"""
+
+BROWSER_TEST_GEN_PROMPT_TEMPLATE = """\
+Generate Playwright E2E tests for this Supabase app. The tests will verify:
+1. Auth redirect - unauthenticated users are redirected to login
+2. Login flow - user can log in with valid credentials
+3. Create resource - authenticated user can create the main resource
+4. Real-time create - user B sees user A's creation without refresh
+5. Real-time delete - user B sees user A's deletion without refresh
+
+PROJECT GOAL: {user_prompt}
+
+EXAMINE THE CODEBASE to find:
+1. Login page route and form selectors (email input, password input, submit button)
+2. Main dashboard/list page route
+3. Resource creation form (button to open, form fields, submit button)
+4. Resource display (how items are shown, delete buttons if any)
+5. Any data-testid attributes that exist
+
+After examining, write the test file to: {test_file_path}
+
+The test file MUST:
+- Import asyncio at the top
+- Define async test functions prefixed with 'test_'
+- Each function receives a TestContext parameter named 'ctx'
+- Use ctx.new_page_a() and ctx.new_page_b() for browser contexts
+- Use ctx.app_url, ctx.user_a_email, ctx.user_a_password, etc.
+- Use NAVIGATION_TIMEOUT = 15000 and REALTIME_TIMEOUT = 5000
+
+Example test structure:
+```python
+import asyncio
+
+NAVIGATION_TIMEOUT = 15000
+REALTIME_TIMEOUT = 5000
+
+async def test_auth_redirect(ctx):
+    page = await ctx.new_page_a()
+    try:
+        await page.goto(ctx.app_url, timeout=NAVIGATION_TIMEOUT)
+        # Use actual selectors from the codebase
+        assert await page.locator('input[name="email"]').is_visible()
+    finally:
+        await page.close()
+```
+
+First examine the relevant component files, then write the complete test file.
 """
 
 
@@ -1664,6 +1742,219 @@ def write_env_local(
 
 
 # ─────────────────────────────────────────────
+# Browser Testing with Playwright
+# ─────────────────────────────────────────────
+
+def run_browser_tests(
+    test_file_path: str,
+    app_url: str,
+    supabase_url: str,
+    supabase_anon_key: str,
+    supabase_service_key: str,
+) -> dict:
+    """
+    Run Playwright browser tests from a generated test file.
+
+    Args:
+        test_file_path: Path to the generated test file (e.g., project_dir/e2e/tests.py)
+        app_url: URL where the app is running
+        supabase_url: Supabase project URL
+        supabase_anon_key: Supabase anon key
+        supabase_service_key: Supabase service role key
+
+    Returns dict with:
+        - passed: int
+        - failed: int
+        - skipped: int
+        - results: list of test results
+        - error: optional error message if tests couldn't run
+    """
+    try:
+        # Try to import the playwright tests module
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "playwright_tests",
+            os.path.join(os.path.dirname(__file__), "playwright_tests.py")
+        )
+        if spec is None or spec.loader is None:
+            return {"error": "playwright_tests.py not found", "results": []}
+
+        playwright_tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(playwright_tests)
+
+        # Run the tests synchronously from the generated test file
+        result = playwright_tests.run_tests_sync(
+            test_file_path=test_file_path,
+            app_url=app_url,
+            supabase_url=supabase_url,
+            supabase_anon_key=supabase_anon_key,
+            supabase_service_key=supabase_service_key,
+            headless=True,
+        )
+
+        return result.to_dict()
+
+    except ImportError as e:
+        return {
+            "error": f"Playwright not installed: {e}. Run: pip install playwright && playwright install chromium",
+            "results": [],
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+    except Exception as e:
+        return {
+            "error": f"Browser test error: {e}",
+            "results": [],
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
+
+
+def generate_browser_tests(
+    project_dir: str,
+    user_prompt: str,
+    test_file_path: str,
+    tool: str = "claude_code",
+) -> CLIResult:
+    """
+    Have the agent examine the codebase and generate Playwright tests.
+
+    The agent will:
+    1. Look at component files to find actual selectors
+    2. Write tests using those real selectors
+    3. Save tests to test_file_path
+
+    Returns CLIResult with the generation output.
+    """
+    # Ensure the e2e directory exists
+    e2e_dir = os.path.dirname(test_file_path)
+    os.makedirs(e2e_dir, exist_ok=True)
+
+    prompt = BROWSER_TEST_GEN_PROMPT_TEMPLATE.format(
+        user_prompt=user_prompt,
+        test_file_path=test_file_path,
+    )
+
+    return run_tool(
+        tool=tool,
+        prompt=prompt,
+        working_dir=project_dir,
+        system_prompt=BROWSER_TEST_GEN_SYSTEM_PROMPT,
+    )
+
+
+def detect_app_port(project_dir: str) -> int:
+    """Detect the port the app will run on based on project type."""
+    # Check package.json for port hints
+    package_json_path = os.path.join(project_dir, "package.json")
+    if os.path.exists(package_json_path):
+        try:
+            with open(package_json_path) as f:
+                pkg = json.load(f)
+                scripts = pkg.get("scripts", {})
+                # Look for port in dev/start scripts
+                for script_name in ["dev", "start"]:
+                    script = scripts.get(script_name, "")
+                    # Match patterns like -p 3000, --port 3000, PORT=3000
+                    port_match = re.search(r'(?:-p|--port|PORT=)\s*(\d+)', script)
+                    if port_match:
+                        return int(port_match.group(1))
+        except:
+            pass
+
+    # Check for Next.js (default 3000)
+    if os.path.exists(os.path.join(project_dir, "next.config.js")) or \
+       os.path.exists(os.path.join(project_dir, "next.config.ts")) or \
+       os.path.exists(os.path.join(project_dir, "next.config.mjs")):
+        return 3000
+
+    # Check for Vite (default 5173)
+    if os.path.exists(os.path.join(project_dir, "vite.config.js")) or \
+       os.path.exists(os.path.join(project_dir, "vite.config.ts")):
+        return 5173
+
+    # Check for Create React App (default 3000)
+    if os.path.exists(os.path.join(project_dir, "public", "index.html")):
+        return 3000
+
+    # Default to 3000
+    return 3000
+
+
+def start_dev_server(project_dir: str, timeout: int = 30) -> tuple[subprocess.Popen, int]:
+    """
+    Start the dev server and wait for it to be ready.
+
+    Returns (process, port) tuple.
+    """
+    port = detect_app_port(project_dir)
+
+    # Determine the start command
+    package_json_path = os.path.join(project_dir, "package.json")
+    if os.path.exists(package_json_path):
+        try:
+            with open(package_json_path) as f:
+                pkg = json.load(f)
+                scripts = pkg.get("scripts", {})
+                if "dev" in scripts:
+                    cmd = ["npm", "run", "dev"]
+                elif "start" in scripts:
+                    cmd = ["npm", "run", "start"]
+                else:
+                    cmd = ["npm", "start"]
+        except:
+            cmd = ["npm", "run", "dev"]
+    else:
+        cmd = ["npm", "run", "dev"]
+
+    # Start the server
+    env = os.environ.copy()
+    env["PORT"] = str(port)
+
+    process = subprocess.Popen(
+        cmd,
+        cwd=project_dir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    # Wait for server to be ready
+    import socket
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(('localhost', port))
+            sock.close()
+            if result == 0:
+                # Give it a moment to fully initialize
+                time.sleep(2)
+                return process, port
+        except:
+            pass
+        time.sleep(0.5)
+
+    # Timeout - kill the process
+    process.terminate()
+    raise TimeoutError(f"Dev server didn't start on port {port} within {timeout}s")
+
+
+def stop_dev_server(process: subprocess.Popen):
+    """Stop the dev server process."""
+    if process:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+# ─────────────────────────────────────────────
 # Logging helpers
 # ─────────────────────────────────────────────
 
@@ -2433,74 +2724,336 @@ def run_orchestration(
         idx += 1
 
     if not skip_smoke_test:
-        # ── Phase 3: Smoke Test ───────────────────────
-        print(f"\n{'=' * 60}")
-        print(f"  PHASE 3: SMOKE TEST ({verifier_tool})")
-        print(f"{'=' * 60}")
+        # ── Phase 3: Smoke Test (with retry loop) ───────────────────────
+        smoke_test_retry = 0
+        smoke = None
+        run_final_status = "completed"
 
-        # Build credentials section for smoke test
-        credentials_section = ""
-        auth_instructions = ""
-        if target_supabase_url and target_supabase_anon_key:
-            credentials_section = f"""SUPABASE_URL: {target_supabase_url}
+        while smoke_test_retry <= MAX_SMOKE_TEST_RETRIES:
+            print(f"\n{'=' * 60}")
+            if smoke_test_retry == 0:
+                print(f"  PHASE 3: SMOKE TEST ({verifier_tool})")
+            else:
+                print(f"  PHASE 3: SMOKE TEST - RETRY {smoke_test_retry}/{MAX_SMOKE_TEST_RETRIES} ({verifier_tool})")
+            print(f"{'=' * 60}")
+
+            # Build credentials section for smoke test
+            credentials_section = ""
+            auth_instructions = ""
+            if target_supabase_url and target_supabase_anon_key:
+                credentials_section = f"""SUPABASE_URL: {target_supabase_url}
 SUPABASE_ANON_KEY: {target_supabase_anon_key}"""
-            if target_supabase_service_key:
-                credentials_section += f"\nSUPABASE_SERVICE_KEY: {target_supabase_service_key}"
-            auth_instructions = """
+                if target_supabase_service_key:
+                    credentials_section += f"\nSUPABASE_SERVICE_KEY: {target_supabase_service_key}"
+                auth_instructions = """
 If the app has authentication:
 1. Create a test user using the service_role key
 2. Sign in as that user
 3. Verify authenticated features work
 4. Clean up the test user"""
 
-        smoke_prompt = SMOKE_TEST_PROMPT_TEMPLATE.format(
-            user_prompt=user_prompt,
-            credentials_section=credentials_section,
-            completed_steps="\n".join(completed_descriptions) if completed_descriptions else "None",
-            auth_instructions=auth_instructions,
-        )
+            smoke_prompt = SMOKE_TEST_PROMPT_TEMPLATE.format(
+                user_prompt=user_prompt,
+                credentials_section=credentials_section,
+                completed_steps="\n".join(completed_descriptions) if completed_descriptions else "None",
+                auth_instructions=auth_instructions,
+            )
 
-        smoke_result = run_tool(
-            verifier_tool,
-            prompt=smoke_prompt,
-            working_dir=project_dir,
-            system_prompt=SMOKE_TEST_SYSTEM_PROMPT,
-        )
+            smoke_result = run_tool(
+                verifier_tool,
+                prompt=smoke_prompt,
+                working_dir=project_dir,
+                system_prompt=SMOKE_TEST_SYSTEM_PROMPT,
+            )
 
-        # Log with redacted credentials
-        redacted_smoke_prompt = redact_credentials(smoke_prompt, credentials_to_redact)
-        log_step(store, run_id, len(steps) + 1, "smoke_test", verifier_tool,
-                 redacted_smoke_prompt, smoke_result)
+            # Log with redacted credentials
+            redacted_smoke_prompt = redact_credentials(smoke_prompt, credentials_to_redact)
+            log_step(store, run_id, len(steps) + smoke_test_retry + 1, "smoke_test", verifier_tool,
+                     redacted_smoke_prompt, smoke_result)
 
-        smoke = parse_smoke_test(smoke_result.text_result)
+            smoke = parse_smoke_test(smoke_result.text_result)
 
-        app_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["app_starts"], "❓")
-        test_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭", "NO_TESTS": "⏭"}.get(smoke["tests_pass"], "❓")
-        build_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["build_succeeds"], "❓")
-        auth_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["auth_works"], "❓")
-        storage_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["storage_works"], "❓")
+            app_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["app_starts"], "❓")
+            test_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭", "NO_TESTS": "⏭"}.get(smoke["tests_pass"], "❓")
+            build_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["build_succeeds"], "❓")
+            auth_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["auth_works"], "❓")
+            storage_emoji = {"YES": "✅", "NO": "❌", "N/A": "⏭"}.get(smoke["storage_works"], "❓")
 
-        print(f"\n  {build_emoji} Build succeeds: {smoke['build_succeeds']}")
-        print(f"  {app_emoji} App starts: {smoke['app_starts']}")
-        print(f"  {test_emoji} Tests pass: {smoke['tests_pass']}")
-        print(f"  {auth_emoji} Auth works: {smoke['auth_works']}")
-        print(f"  {storage_emoji} Storage works: {smoke['storage_works']}")
-        if smoke["errors"]:
-            print(f"  Errors:")
-            for err in smoke["errors"]:
-                print(f"    • {err}")
-        print(f"  Summary: {smoke['summary']}")
+            print(f"\n  {build_emoji} Build succeeds: {smoke['build_succeeds']}")
+            print(f"  {app_emoji} App starts: {smoke['app_starts']}")
+            print(f"  {test_emoji} Tests pass: {smoke['tests_pass']}")
+            print(f"  {auth_emoji} Auth works: {smoke['auth_works']}")
+            print(f"  {storage_emoji} Storage works: {smoke['storage_works']}")
+            if smoke["errors"]:
+                print(f"  Errors:")
+                for err in smoke["errors"]:
+                    print(f"    • {err}")
+            print(f"  Summary: {smoke['summary']}")
 
-        if smoke["build_succeeds"] == "NO":
-            run_final_status = "completed_build_failing"
-        elif smoke["app_starts"] == "NO":
-            run_final_status = "completed_failing"
-        elif smoke["tests_pass"] == "NO":
-            run_final_status = "completed_tests_failing"
-        elif smoke["auth_works"] == "NO":
-            run_final_status = "completed_auth_failing"
-        else:
-            run_final_status = "completed"
+            # Check for critical failures
+            has_critical_failure = (
+                smoke["build_succeeds"] == "NO" or
+                smoke["app_starts"] == "NO" or
+                smoke["auth_works"] == "NO" or
+                smoke["storage_works"] == "NO"
+            )
+
+            # If failures and we have retries left, create a fix step
+            if has_critical_failure and smoke["errors"] and smoke_test_retry < MAX_SMOKE_TEST_RETRIES:
+                print(f"\n  🔄 Smoke test failed - creating fix step...")
+
+                # Build error description for the fix step
+                error_description = "\n".join(f"- {err}" for err in smoke["errors"])
+                failure_types = []
+                if smoke["build_succeeds"] == "NO":
+                    failure_types.append("build failure")
+                if smoke["app_starts"] == "NO":
+                    failure_types.append("app won't start")
+                if smoke["auth_works"] == "NO":
+                    failure_types.append("authentication broken")
+                if smoke["storage_works"] == "NO":
+                    failure_types.append("storage/database broken")
+
+                fix_step = {
+                    "number": len(steps) + smoke_test_retry + 1,
+                    "title": f"Fix smoke test failures ({', '.join(failure_types)})",
+                    "instructions": f"""The smoke test found critical issues that must be fixed:
+
+FAILURES: {', '.join(failure_types)}
+
+ERRORS:
+{error_description}
+
+SMOKE TEST SUMMARY: {smoke['summary']}
+
+Fix these issues so the application builds, starts, and functions correctly.
+Focus on the root cause - the errors above contain specific details about what's broken.""",
+                    "build_phase": "fix",
+                }
+
+                # Run fix step through implement → verify loop
+                print(f"\n{'=' * 60}")
+                print(f"  FIX STEP: {fix_step['title']}")
+                print(f"{'=' * 60}")
+
+                fix_session_id = None
+                fix_resolution_count = 0
+
+                while fix_resolution_count < 3:  # Max 3 attempts per fix step
+                    print(f"\n  ▶ Implementing fix (attempt {fix_resolution_count + 1}/3)...")
+                    print(f"  {'─' * 50}")
+
+                    fix_prompt = IMPLEMENTER_PROMPT_TEMPLATE.format(
+                        step_number=fix_step["number"],
+                        total_steps=len(steps) + smoke_test_retry + 1,
+                        user_prompt=user_prompt,
+                        step_title=fix_step["title"],
+                        step_instructions=fix_step["instructions"],
+                        completed_steps="\n".join(completed_descriptions) if completed_descriptions else "None",
+                    )
+
+                    if encourage_web_search:
+                        fix_prompt += IMPLEMENTER_WEB_SEARCH_ENCOURAGEMENT
+
+                    if fix_session_id:
+                        print(f"  🔄 Resuming session: {fix_session_id[:8]}...")
+                    fix_result = run_tool(implementer_tool, fix_prompt, project_dir,
+                                          session_id=fix_session_id)
+
+                    if not fix_session_id and fix_result.session_id:
+                        fix_session_id = fix_result.session_id
+
+                    log_step(store, run_id, fix_step["number"], "implement_fix", implementer_tool,
+                             fix_prompt, fix_result, build_phase="fix")
+
+                    # Verify the fix
+                    print(f"\n  ▶ Verifying fix...")
+                    print(f"  {'─' * 50}")
+
+                    verify_fix_prompt = VERIFIER_PROMPT_TEMPLATE.format(
+                        step_number=fix_step["number"],
+                        total_steps=len(steps) + smoke_test_retry + 1,
+                        step_title=fix_step["title"],
+                        step_instructions=fix_step["instructions"],
+                        implementer_output=fix_result.text_result,
+                    )
+
+                    verifier_system = VERIFIER_SYSTEM_PROMPT
+                    if encourage_web_search:
+                        verifier_system += VERIFIER_WEB_SEARCH_ENCOURAGEMENT
+
+                    verify_fix_result = run_tool(
+                        verifier_tool,
+                        prompt=verify_fix_prompt,
+                        working_dir=project_dir,
+                        system_prompt=verifier_system,
+                    )
+
+                    log_step(store, run_id, fix_step["number"], "verify_fix", verifier_tool,
+                             verify_fix_prompt, verify_fix_result, build_phase="fix")
+
+                    fix_verification = parse_verification(verify_fix_result.text_result)
+
+                    status_emoji = {"PASS": "✅", "FAIL": "❌", "PARTIAL": "⚠️"}.get(
+                        fix_verification["status"], "❓"
+                    )
+                    print(f"\n  {status_emoji} Fix verification: {fix_verification['status']}")
+                    print(f"     Summary: {fix_verification['summary']}")
+
+                    if fix_verification["recommendation"] == "PROCEED":
+                        print(f"  ✓ Fix applied successfully")
+                        completed_descriptions.append(
+                            f"- Fix step: {fix_step['title']} - Applied"
+                        )
+                        break
+                    elif fix_verification["recommendation"] == "RETRY":
+                        fix_resolution_count += 1
+                        if fix_resolution_count < 3:
+                            fix_step["instructions"] += (
+                                f"\n\nPREVIOUS FIX ATTEMPT ISSUES:\n"
+                                + "\n".join(f"- {i}" for i in fix_verification["issues"])
+                            )
+                        else:
+                            print(f"  ❌ Max fix attempts reached")
+                            completed_descriptions.append(
+                                f"- Fix step: {fix_step['title']} - Attempted but issues remain"
+                            )
+                            break
+                    else:
+                        # SKIP, MODIFY_PLAN, etc - just move on
+                        print(f"  ⚠️ Fix verification: {fix_verification['recommendation']}")
+                        completed_descriptions.append(
+                            f"- Fix step: {fix_step['title']} - {fix_verification['recommendation']}"
+                        )
+                        break
+
+                smoke_test_retry += 1
+                continue  # Re-run smoke test
+
+            # No critical failures or retries exhausted - determine final status
+            if smoke["build_succeeds"] == "NO":
+                run_final_status = "completed_build_failing"
+            elif smoke["app_starts"] == "NO":
+                run_final_status = "completed_failing"
+            elif smoke["tests_pass"] == "NO":
+                run_final_status = "completed_tests_failing"
+            elif smoke["auth_works"] == "NO":
+                run_final_status = "completed_auth_failing"
+            else:
+                run_final_status = "completed"
+            break  # Exit smoke test loop
+
+        if smoke_test_retry > 0:
+            print(f"\n  {'✅' if run_final_status == 'completed' else '⚠️'} Smoke test completed after {smoke_test_retry} fix attempt(s)")
+
+        # ── Browser Tests (if app starts and we have credentials) ──────
+        if (smoke and smoke["app_starts"] == "YES" and
+            target_supabase_url and target_supabase_anon_key and target_supabase_service_key):
+
+            print(f"\n{'─' * 60}")
+            print(f"  BROWSER TESTS (Playwright)")
+            print(f"{'─' * 60}")
+
+            # Step 1: Generate tests by having the agent examine the codebase
+            test_file_path = os.path.join(project_dir, "e2e", "tests.py")
+            print(f"  Generating browser tests...")
+            print(f"    Agent examining codebase to find actual selectors...")
+
+            test_gen_result = generate_browser_tests(
+                project_dir=project_dir,
+                user_prompt=user_prompt,
+                test_file_path=test_file_path,
+                tool=verifier_tool,  # Use verifier tool (Claude) for test generation
+            )
+
+            # Log the test generation step
+            log_step(store, run_id, len(steps) + MAX_SMOKE_TEST_RETRIES + 2,
+                     "browser_test_gen", verifier_tool, "Generate Playwright tests",
+                     test_gen_result, build_phase="testing",
+                     credentials_to_redact=credentials_to_redact)
+
+            if test_gen_result.exit_code != 0:
+                error_preview = test_gen_result.text_result[:2000] if test_gen_result.text_result else 'Unknown error'
+                print(f"  ⚠️ Test generation failed: {error_preview}")
+            elif not os.path.exists(test_file_path):
+                print(f"  ⚠️ Test generation completed but test file not created at {test_file_path}")
+            else:
+                print(f"  ✓ Tests generated at {test_file_path}")
+
+                # Step 2: Start dev server and run tests
+                dev_server = None
+                try:
+                    print(f"  Starting dev server...")
+                    dev_server, app_port = start_dev_server(project_dir, timeout=60)
+                    app_url = f"http://localhost:{app_port}"
+                    print(f"  ✓ Dev server running at {app_url}")
+
+                    # Run the generated browser tests
+                    print(f"  Running browser tests...")
+                    browser_results = run_browser_tests(
+                        test_file_path=test_file_path,
+                        app_url=app_url,
+                        supabase_url=target_supabase_url,
+                        supabase_anon_key=target_supabase_anon_key,
+                        supabase_service_key=target_supabase_service_key,
+                    )
+
+                    if browser_results.get("error"):
+                        print(f"  ⚠️ Browser tests error: {browser_results['error']}")
+                    else:
+                        # Log each test result as a separate event
+                        passed = browser_results.get("passed", 0)
+                        failed = browser_results.get("failed", 0)
+                        skipped = browser_results.get("skipped", 0)
+
+                        print(f"\n  Browser Test Results: {passed} passed, {failed} failed, {skipped} skipped")
+
+                        for test_result in browser_results.get("results", []):
+                            emoji = {"PASS": "✅", "FAIL": "❌", "SKIP": "⏭"}.get(test_result["status"], "❓")
+                            print(f"    {emoji} {test_result['name']}: {test_result['status']}")
+                            if test_result.get("error"):
+                                print(f"        Error: {test_result['error']}")
+
+                        # Log browser test results to storage
+                        browser_test_result = CLIResult()
+                        browser_test_result.text_result = json.dumps(browser_results, indent=2)
+                        browser_test_result.exit_code = 1 if failed > 0 else 0
+                        browser_test_result.duration = browser_results.get("duration_ms", 0) / 1000
+                        browser_test_result.events = [
+                            {
+                                "type": "browser_test",
+                                "name": r["name"],
+                                "status": r["status"],
+                                "duration_ms": r.get("duration_ms", 0),
+                                "error": r.get("error"),
+                                "details": r.get("details", {}),
+                            }
+                            for r in browser_results.get("results", [])
+                        ]
+
+                        log_step(store, run_id, len(steps) + MAX_SMOKE_TEST_RETRIES + 3,
+                                 "browser_test", "playwright", "Playwright browser tests",
+                                 browser_test_result, build_phase="testing",
+                                 credentials_to_redact=credentials_to_redact)
+
+                        # Update final status if browser tests failed
+                        if failed > 0 and run_final_status == "completed":
+                            run_final_status = "completed_browser_tests_failing"
+
+                except TimeoutError as e:
+                    print(f"  ⚠️ {e}")
+                except Exception as e:
+                    print(f"  ⚠️ Browser test error: {e}")
+                finally:
+                    if dev_server:
+                        print(f"  Stopping dev server...")
+                        stop_dev_server(dev_server)
+                        print(f"  ✓ Dev server stopped")
+        elif smoke and smoke["app_starts"] != "YES":
+            print(f"\n  ⏭  Browser tests skipped (app doesn't start)")
+        elif not (target_supabase_url and target_supabase_anon_key and target_supabase_service_key):
+            print(f"\n  ⏭  Browser tests skipped (missing Supabase credentials)")
+
     else:
         print(f"\n  ⏭  Smoke test skipped (--skip-smoke-test)")
         run_final_status = "completed"
