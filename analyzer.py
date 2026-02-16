@@ -274,7 +274,7 @@ def show_timeline(store: SupabaseStorage, run_id: str):
     for s in steps:
         phase_icon = {
             "plan": "📋", "implement": "🔨", "verify": "🔍", "replan_checkpoint": "🔄",
-            "migration_exec": "🗄️", "rls_test": "🔐", "edge_function_deploy": "⚡",
+            "migration_exec": "🗄️", "rls_test": "🔐", "api_verify": "🔗", "edge_function_deploy": "⚡",
             "research": "🔍", "diagnostic": "🩺", "smoke_test": "🧪", "approach_analysis": "📊",
             "browser_test_gen": "✍️", "browser_test": "🎭",
             "browser_test_fix": "🔧", "browser_test_fix_verify": "🔍",

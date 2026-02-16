@@ -692,6 +692,62 @@ Test plan:
 Report whether RLS is enforced AND whether table GRANTs are correct.
 """
 
+API_VERIFY_SYSTEM_PROMPT = """\
+You are verifying that database tables are accessible via the Supabase REST API.
+
+This is a SIMPLE connectivity check - not a full RLS test. Just verify tables return 200.
+
+RULES:
+- Create a test user using the Supabase Auth Admin API (service_role key for admin endpoint)
+- Sign in as that user to get a JWT
+- For each table touched in this step, make ONE authenticated GET request
+- Use: anon key + user JWT (Authorization: Bearer <jwt>)
+- Check for 200 status (not 400, not PGRST errors)
+- Clean up the test user when done
+
+TEST PATTERN (use curl):
+  # Create user
+  curl -X POST "$URL/auth/v1/admin/users" -H "apikey: $SERVICE_KEY" -H "Authorization: Bearer $SERVICE_KEY" \\
+    -H "Content-Type: application/json" -d '{"email":"apitest@test.local","password":"testpass123","email_confirm":true}'
+
+  # Sign in to get JWT
+  RESPONSE=$(curl -s -X POST "$URL/auth/v1/token?grant_type=password" -H "apikey: $ANON_KEY" \\
+    -H "Content-Type: application/json" -d '{"email":"apitest@test.local","password":"testpass123"}')
+  JWT=$(echo $RESPONSE | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
+
+  # Test each table
+  curl -s -o /dev/null -w "%{http_code}" "$URL/rest/v1/TABLE_NAME?limit=1" \\
+    -H "apikey: $ANON_KEY" -H "Authorization: Bearer $JWT"
+
+FORMAT your response as:
+TABLES_CHECKED: [number]
+TABLES_OK: [number]
+STATUS: SUCCESS | FAILED
+ERRORS (if any):
+- [table_name]: [error message or status code]
+
+SUMMARY: [1-2 sentence assessment]
+"""
+
+API_VERIFY_PROMPT_TEMPLATE = """\
+Verify that database tables created/modified in this step are accessible via the Supabase REST API.
+
+STEP: {step_number} - {step_title}
+
+SUPABASE_URL: {supabase_url}
+SUPABASE_ANON_KEY: {supabase_anon_key}
+SUPABASE_SERVICE_KEY: {supabase_service_key}
+
+This is a simple connectivity check. For each table touched in this step:
+1. Create a test user via Auth API
+2. Sign in to get a JWT
+3. Make one GET request to /rest/v1/TABLE_NAME?limit=1 with anon key + JWT
+4. Check for 200 status (not 400 or PGRST errors)
+5. Clean up the test user
+
+Report which tables were checked and whether they return 200.
+"""
+
 EDGE_FUNCTION_DEPLOY_SYSTEM_PROMPT = """\
 You are deploying and testing Supabase Edge Functions.
 
@@ -1651,6 +1707,41 @@ def parse_rls_test_result(rls_text: str) -> dict:
     return result
 
 
+def parse_api_verify_result(api_text: str) -> dict:
+    """Parse the API verification output."""
+    result = {
+        "tables_checked": 0,
+        "tables_ok": 0,
+        "status": "UNKNOWN",
+        "errors": [],
+        "summary": "",
+    }
+
+    for line in api_text.split("\n"):
+        stripped = strip_markdown(line.strip())
+        upper = stripped.upper()
+
+        if upper.startswith("TABLES_CHECKED:"):
+            try:
+                result["tables_checked"] = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif upper.startswith("TABLES_OK:"):
+            try:
+                result["tables_ok"] = int(stripped.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif upper.startswith("STATUS:"):
+            val = stripped.split(":", 1)[1].strip().upper()
+            result["status"] = "SUCCESS" if "SUCCESS" in val else "FAILED"
+        elif upper.startswith("SUMMARY:"):
+            result["summary"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("- "):
+            result["errors"].append(stripped[2:])
+
+    return result
+
+
 def parse_edge_function_result(ef_text: str) -> dict:
     """Parse the Edge Function deployer's output."""
     result = {
@@ -2434,6 +2525,44 @@ def run_orchestration(
                             if rls["errors"]:
                                 print(f"     Errors:")
                                 for err in rls["errors"]:
+                                    print(f"       • {err}")
+
+                            # ── Run API verification alongside RLS tests ──────
+                            # Simple connectivity check: one request per table, check for 200
+                            print(f"\n  ▶ Verifying API access to tables...")
+                            print(f"  {'─' * 50}")
+
+                            api_verify_prompt = API_VERIFY_PROMPT_TEMPLATE.format(
+                                step_number=step_num,
+                                step_title=step["title"],
+                                supabase_url=target_supabase_url,
+                                supabase_anon_key=target_supabase_anon_key,
+                                supabase_service_key=target_supabase_service_key,
+                            )
+
+                            api_verify_result = run_tool(
+                                verifier_tool,
+                                prompt=api_verify_prompt,
+                                working_dir=project_dir,
+                                system_prompt=API_VERIFY_SYSTEM_PROMPT,
+                            )
+
+                            # Log with redacted credentials
+                            redacted_api_verify_prompt = redact_credentials(
+                                api_verify_prompt, credentials_to_redact
+                            )
+                            log_step(store, run_id, step_num, "api_verify", verifier_tool,
+                                     redacted_api_verify_prompt, api_verify_result, build_phase="schema")
+
+                            api_verify = parse_api_verify_result(api_verify_result.text_result)
+                            step_runtime_results["api_verify"] = api_verify
+
+                            api_emoji = "✅" if api_verify["status"] == "SUCCESS" else "❌"
+                            print(f"\n  {api_emoji} API verification: {api_verify['status']}")
+                            print(f"     Tables checked: {api_verify['tables_checked']}, OK: {api_verify['tables_ok']}")
+                            if api_verify["errors"]:
+                                print(f"     Errors:")
+                                for err in api_verify["errors"]:
                                     print(f"       • {err}")
 
                             # Fail if RLS not enforced OR grants are missing

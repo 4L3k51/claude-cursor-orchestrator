@@ -305,32 +305,38 @@ async def run_generated_tests(
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=headless)
-            context_a = await browser.new_context()
-            context_b = await browser.new_context()
 
-            ctx = TestContext(
-                app_url=app_url,
-                supabase_url=supabase_url,
-                supabase_anon_key=supabase_anon_key,
-                supabase_service_key=supabase_service_key,
-                user_a_email=user_a_email,
-                user_a_password=password,
-                user_b_email=user_b_email,
-                user_b_password=password,
-                browser_context_a=context_a,
-                browser_context_b=context_b,
-            )
-
-            # Run each test
+            # Run each test with FRESH browser contexts for isolation
+            # This ensures auth state doesn't leak between tests
             for test_name, test_func in test_functions:
                 print(f"  Running: {test_name}")
+
+                # Create fresh contexts for this test (no cookies, no persisted login)
+                context_a = await browser.new_context()
+                context_b = await browser.new_context()
+
+                ctx = TestContext(
+                    app_url=app_url,
+                    supabase_url=supabase_url,
+                    supabase_anon_key=supabase_anon_key,
+                    supabase_service_key=supabase_service_key,
+                    user_a_email=user_a_email,
+                    user_a_password=password,
+                    user_b_email=user_b_email,
+                    user_b_password=password,
+                    browser_context_a=context_a,
+                    browser_context_b=context_b,
+                )
+
                 result = await run_single_test(test_func, test_name, ctx)
                 results.results.append(result)
                 status_emoji = {"PASS": "✅", "FAIL": "❌", "SKIP": "⏭"}.get(result.status, "❓")
                 print(f"    {status_emoji} {result.status}" + (f": {result.error}" if result.error else ""))
 
-            await context_a.close()
-            await context_b.close()
+                # Close contexts after each test to ensure clean slate for next test
+                await context_a.close()
+                await context_b.close()
+
             await browser.close()
 
     except Exception as e:
