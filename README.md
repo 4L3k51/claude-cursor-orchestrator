@@ -82,11 +82,48 @@ You: "Build a Supabase todo app with auth"
 ```
 6. Replan Checkpoint — After step completion, evaluate if remaining steps need adjustment. If implementation diverged,     
   regenerate remaining steps. Completed steps stay locked.                                                                   
-  7. Log — Everything goes to Supabase                                                                                       
-                                                                                                                             
-  Loop controls:                                                                                                             
-  - resolution_count — max 5 resolution actions (retry, search, diagnostic) per step                                         
-  - Replan — separate from resolution budget, runs after step passes 
+  7. Log — Everything goes to Supabase
+
+  Loop controls:
+  - resolution_count — max 7 resolution actions (retry, search, diagnostic) per step
+  - Replan — separate from resolution budget, runs after step passes
+
+## Test Frameworks
+
+After implementation, the orchestrator runs multiple verification layers to catch different failure modes:
+
+| Test Layer | What It Tests | Method |
+|------------|---------------|--------|
+| **Smoke Test** | Build succeeds, app starts, auth works, storage works | Claude agent runs npm build, starts dev server, tests auth via curl |
+| **RLS Tests** | Row Level Security policies enforce correctly | Creates test user, gets JWT, makes authenticated curl requests to verify policies |
+| **API Verification** | REST endpoints respond with expected data | Direct curl requests to Supabase REST API |
+| **Edge Function Tests** | Edge functions deploy and execute | Deploys via Supabase CLI, tests with curl |
+| **Playwright Browser Tests** | E2E user flows work in real browser | Two-user browser contexts verify auth, CRUD, and cross-user realtime sync |
+
+**Test execution flow:**
+```
+Implementation Complete
+        │
+        ▼
+   Smoke Test ──────▶ Fix Loop (max 2 retries)
+        │
+        ▼
+   RLS Tests ───────▶ Per-step, only on schema changes
+        │
+        ▼
+  Browser Tests ────▶ Fix Loop (max 2 retries)
+        │
+        ▼
+    Results logged to Supabase
+```
+
+**Playwright browser tests** verify:
+1. Auth redirect — unauthenticated users see login
+2. Login flow — user can sign in
+3. Create resource — authenticated CRUD works
+4. Realtime sync — User B sees User A's changes without refresh (requires two browser contexts)
+
+All test results are logged with pass/fail status, error messages, and duration for analysis.
 
 ## What Gets Logged
 
