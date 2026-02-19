@@ -125,6 +125,91 @@ Implementation Complete
 
 All test results are logged with pass/fail status, error messages, and duration for analysis.
 
+## Usage
+
+```
+python orchestrator.py [prompt] [options]
+```
+
+### Positional
+
+| Argument | Description |
+|----------|-------------|
+| `prompt` | What to build (the project goal) |
+
+### Project
+
+| Argument | Description |
+|----------|-------------|
+| `--project-dir DIR` | Directory to create project in (default: auto-generated) |
+
+### Resume
+
+| Argument | Description |
+|----------|-------------|
+| `--resume RUN_ID` | Resume a previous run |
+| `--start-step N` | Start from step N (with --resume) |
+
+### Execution
+
+| Argument | Description |
+|----------|-------------|
+| `--max-retries N` | Max retries per step (default: 2) |
+| `--skip-smoke-test` | Skip the smoke test phase |
+| `--encourage-web-search` | Encourage agents to use WebSearch proactively |
+
+### Agent Tools
+
+| Argument | Description |
+|----------|-------------|
+| `--planner {claude,cursor}` | Tool for planning (default: claude) |
+| `--implementer {claude,cursor}` | Tool for implementation (default: cursor) |
+| `--verifier {claude,cursor}` | Tool for verification (default: claude) |
+
+### Models
+
+| Argument | Description |
+|----------|-------------|
+| `--claude-model MODEL` | Model for Claude Code |
+| `--cursor-model MODEL` | Model for Cursor Agent |
+
+### Skills Injection
+
+Inject phase-specific guidance into implementation steps.
+
+| Argument | Description |
+|----------|-------------|
+| `--skills-mode {none,passive,on-demand}` | Injection mode (default: none) |
+| `--skills-source PATH` | Path to skills directory (default: ./skills) |
+| `--skills-filter {all,phase-matched}` | File selection strategy (default: phase-matched) |
+
+**Modes:**
+- `none` — No skills injection
+- `passive` — Append skill content to system prompt
+- `on-demand` — Copy skills directory to project, add prompt hint
+
+**Filters:**
+- `phase-matched` — Load `{build_phase}.md` matching the current step's phase
+- `all` — Always load `all.md` regardless of phase
+
+**Build phases:** setup, schema, backend, frontend, testing, deployment, fix
+
+### Supabase (for runtime testing)
+
+| Argument | Description |
+|----------|-------------|
+| `--supabase-url URL` | REST API URL |
+| `--supabase-anon-key KEY` | Anon key |
+| `--supabase-service-key KEY` | Service role key (for auth/admin) |
+| `--supabase-db-url URL` | Postgres connection string (for migrations) |
+| `--supabase-project-ref REF` | Project ref (for Edge Function deployment) |
+
+### Other
+
+| Argument | Description |
+|----------|-------------|
+| `--list-runs` | List all previous runs |
+
 ## What Gets Logged
 
 Everything is stored as JSONB in Supabase and queryable with SQL:
