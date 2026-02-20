@@ -755,7 +755,7 @@ def generate_full_report(store, run_id: str) -> dict:
 
         "raw_data": {
             "steps": steps,
-            "events_count": len(events),
+            "events": events,
         },
     }
 
