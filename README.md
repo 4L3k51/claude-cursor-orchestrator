@@ -159,23 +159,27 @@ You: "Build a Supabase todo app with auth"
 
 After implementation, the orchestrator runs multiple verification layers to catch different failure modes:
 
-| Test Layer | What It Tests | Method |
-|------------|---------------|--------|
-| **Smoke Test** | Build succeeds, app starts, auth works, storage works | Claude agent runs npm build, starts dev server, tests auth via curl |
-| **RLS Tests** | Row Level Security policies enforce correctly | Creates test user, gets JWT, makes authenticated curl requests to verify policies |
-| **API Verification** | REST endpoints respond with expected data | Direct curl requests to Supabase REST API |
-| **Edge Function Tests** | Edge functions deploy and execute | Deploys via Supabase CLI, tests with curl |
-| **Playwright Browser Tests** | E2E user flows work in real browser | Two-user browser contexts verify auth, CRUD, and cross-user realtime sync |
+| Test Layer | What It Tests | When It Runs |
+|------------|---------------|--------------|
+| **API Verification** | Tables exist, REST endpoints respond | Per-step, on schema changes |
+| **RLS Tests** | Row Level Security policies enforce correctly | Per-step, when step mentions RLS/policies |
+| **Smoke Test** | Build succeeds, app starts, auth works, storage works | After all steps complete |
+| **Edge Function Tests** | Edge functions deploy and execute | Per-step, on backend steps with functions |
+| **Playwright Browser Tests** | E2E user flows work in real browser | After smoke test passes |
 
 **Test execution flow:**
 ```
-Implementation Complete
+During Implementation (per-step)
+        │
+        ├── API Verification ──▶ On schema steps (checks tables exist)
+        │
+        └── RLS Tests ─────────▶ On steps mentioning RLS/policies
+                                  (retry loop within step resolution)
+
+After All Steps Complete
         │
         ▼
    Smoke Test ──────▶ Fix Loop (max 2 retries)
-        │
-        ▼
-   RLS Tests ───────▶ Per-step, only on schema changes
         │
         ▼
   Browser Tests ────▶ Fix Loop (max 2 retries)
