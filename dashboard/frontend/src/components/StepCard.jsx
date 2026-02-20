@@ -1,0 +1,86 @@
+import React from 'react';
+
+const StepCard = ({ step, isSelected, onClick }) => {
+  const getClassificationClass = () => {
+    switch (step.classification?.toLowerCase()) {
+      case 'architectural':
+        return 'step-architectural';
+      case 'implementation':
+        return 'step-implementation';
+      case 'clean_pass':
+        return 'step-clean';
+      default:
+        return 'step-pending';
+    }
+  };
+
+  const getVerdictBadge = () => {
+    const verdict = step.final_verdict?.toUpperCase();
+    switch (verdict) {
+      case 'PROCEED':
+        return <span className="verdict-badge verdict-proceed">PROCEED</span>;
+      case 'FAIL':
+        return <span className="verdict-badge verdict-fail">FAIL</span>;
+      case 'SKIP':
+        return <span className="verdict-badge verdict-skip">SKIP</span>;
+      default:
+        return <span className="verdict-badge verdict-unknown">{verdict || 'UNKNOWN'}</span>;
+    }
+  };
+
+  const getClassificationBadge = () => {
+    const cls = step.classification?.toLowerCase();
+    switch (cls) {
+      case 'architectural':
+        return <span className="cls-badge cls-architectural">🔴 Architectural</span>;
+      case 'implementation':
+        return <span className="cls-badge cls-implementation">🟡 Implementation</span>;
+      case 'clean_pass':
+        return <span className="cls-badge cls-clean">🟢 Clean Pass</span>;
+      case 'ambiguous':
+        return <span className="cls-badge cls-ambiguous">⚪ Ambiguous</span>;
+      default:
+        return <span className="cls-badge cls-pending">Pending</span>;
+    }
+  };
+
+  const formatDuration = (seconds) => {
+    if (seconds == null) return '-';
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  };
+
+  const handleClick = (e) => {
+    console.log('StepCard clicked:', step.step_number, 'isSelected:', isSelected);
+    if (onClick) {
+      onClick(e);
+    }
+  };
+
+  return (
+    <div
+      className={`step-card ${getClassificationClass()} ${isSelected ? 'step-selected' : ''}`}
+      onClick={handleClick}
+    >
+      <div className="step-card-header">
+        <span className="step-number">Step {step.step_number}</span>
+        {step.build_phase && <span className="step-phase-label">— {step.build_phase}</span>}
+      </div>
+      <div className="step-card-badges">
+        {step.phase && <span className="phase-badge">{step.phase}</span>}
+        {getVerdictBadge()}
+        {step.retries > 0 && (
+          <span className="retry-badge">{step.retries} {step.retries === 1 ? 'retry' : 'retries'}</span>
+        )}
+      </div>
+      <div className="step-card-footer">
+        {getClassificationBadge()}
+        <span className="step-duration">{formatDuration(step.duration_seconds)}</span>
+      </div>
+    </div>
+  );
+};
+
+export default StepCard;
