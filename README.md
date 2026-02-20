@@ -14,6 +14,73 @@ By logging every step, tool call, verification verdict, and smoke test result, w
 
 The goal output: identify where documentation, examples, or training data need improvement so these tools build correctly.
 
+## Installation
+
+### Prerequisites
+
+- Python 3.10+
+- [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated
+- [Cursor](https://cursor.sh/) installed (if using Cursor as implementer)
+- A Supabase project for logging
+
+### Setup
+
+```bash
+# Clone and install dependencies
+pip install -r requirements.txt
+
+# For browser tests (optional)
+pip install playwright httpx
+playwright install chromium
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your Supabase credentials (for logging)
+```
+
+### Database Setup
+
+Run the migration to create log tables in your Supabase project:
+
+```bash
+# Copy contents of migration.sql and run in Supabase SQL Editor
+# Dashboard > SQL Editor > New Query > Paste > Run
+```
+
+This creates:
+- `orchestrator_runs` — one row per orchestration session
+- `orchestrator_steps` — each plan/implement/verify phase
+- `orchestrator_events` — tool calls, file writes, errors
+
+### Preflight Check
+
+Verify everything is configured correctly:
+
+```bash
+python preflight.py
+```
+
+This checks CLI tools, Supabase connectivity, and database schema.
+
+## Quick Start
+
+```bash
+# Basic run (uses Claude for planning/verification, Cursor for implementation)
+python orchestrator.py "Build a todo app with Supabase auth"
+
+# With runtime testing against a Supabase project
+python orchestrator.py "Build a todo app with auth" \
+  --supabase-url https://xxx.supabase.co \
+  --supabase-anon-key xxx \
+  --supabase-service-key xxx
+
+# List previous runs
+python orchestrator.py --list-runs
+
+# Resume a failed run from step 3
+python orchestrator.py --resume abc123 --start-step 3
+```
+
 ## The orchestration balancing act
 
 If the orchestration is too thin — no verification, no RLS testing, no replanning — the agents produce code that looks right but doesn't work, and you can't tell where it broke. If the orchestration is too thick — the system prompt includes the exact SQL, the exact config entries, the exact implementation patterns — the agents just follow instructions and you learn nothing about their actual knowledge.
@@ -224,6 +291,64 @@ Everything is stored as JSONB in Supabase and queryable with SQL:
   - `EXIT_ERROR`: non-zero exit code + stderr tail + commands_run
 - **Timing**: duration per step
 
+## Analysis Tools
+
+After runs complete, use `analyzer.py` to explore the logged data:
+
+```bash
+# Full analysis of a run
+python analyzer.py <run_id>
+
+# Show only errors
+python analyzer.py <run_id> --errors
+
+# Tool usage breakdown (which tools called, how often)
+python analyzer.py <run_id> --tools
+
+# Timeline of events
+python analyzer.py <run_id> --timeline
+
+# Deep dive on a specific step
+python analyzer.py <run_id> --step 3
+
+# Save full analysis to reports/
+python analyzer.py <run_id> --save-report
+
+# Export as JSON
+python analyzer.py <run_id> --export report
+
+# Compare two runs
+python analyzer.py --compare <run_id_1> <run_id_2>
+```
+
+The database also includes views for common queries:
+- `orchestrator_run_summary` — aggregated stats per run
+- `orchestrator_errors` — all errors across runs
+- `orchestrator_tool_usage` — tool call frequency
+- `orchestrator_commands` — shell commands executed
+
+## Project Structure
+
+```
+orchestrator/
+├── orchestrator.py      # Main orchestration loop
+├── analyzer.py          # Post-run analysis tool
+├── preflight.py         # Pre-run verification
+├── storage.py           # Supabase storage backend
+├── playwright_tests.py  # Browser test runner
+├── migration.sql        # Database schema
+├── requirements.txt     # Python dependencies
+├── .env.example         # Environment template
+└── skills/              # Phase-specific guidance files
+    ├── all.md           # Universal guidance
+    ├── setup.md         # Project setup phase
+    ├── schema.md        # Database schema phase
+    ├── backend.md       # Backend/API phase
+    ├── frontend.md      # Frontend phase
+    ├── testing.md       # Testing phase
+    ├── deployment.md    # Deployment phase
+    └── fix.md           # Error fix phase
+```
 
 ## License
 
