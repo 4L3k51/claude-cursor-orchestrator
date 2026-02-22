@@ -36,7 +36,8 @@ def get_raw_steps_for_step_number(raw_data: dict, step_number: int) -> list[dict
     steps = raw_data.get("steps", [])
     # Coerce to int for consistent comparison (JSON may have int or string)
     target = int(step_number) if step_number is not None else None
-    return [s for s in steps if _safe_int(s.get("step")) == target]
+    # raw_data.steps uses "step_number" field, not "step"
+    return [s for s in steps if _safe_int(s.get("step_number")) == target]
 
 
 def _delete_run_data(conn: sqlite3.Connection, run_id: str) -> None:
@@ -49,7 +50,12 @@ def _delete_run_data(conn: sqlite3.Connection, run_id: str) -> None:
 
 
 def _extract_phase_from_raw_steps(raw_steps: list[dict]) -> Optional[str]:
-    """Extract phase information from raw steps."""
+    """
+    Extract phase information from raw steps.
+
+    Priority: If any raw step has a runtime test phase, use that.
+    Otherwise use the last entry's phase.
+    """
     if not raw_steps:
         return None
 
@@ -57,11 +63,18 @@ def _extract_phase_from_raw_steps(raw_steps: list[dict]) -> Optional[str]:
     if not phases:
         return None
 
-    # If all phases are the same, return that; otherwise join unique ones
-    unique_phases = list(dict.fromkeys(phases))  # Preserve order, remove duplicates
-    if len(unique_phases) == 1:
-        return unique_phases[0]
-    return ",".join(unique_phases)
+    # Runtime test phases take priority - if any step has one, use it
+    runtime_test_phases = {
+        "smoke_test", "browser_test", "browser_test_gen",
+        "browser_test_fix", "browser_test_fix_verify", "approach_analysis"
+    }
+
+    for phase in phases:
+        if phase in runtime_test_phases:
+            return phase
+
+    # Otherwise return the last phase (most recent)
+    return phases[-1]
 
 
 def _extract_tool_from_raw_steps(raw_steps: list[dict]) -> Optional[str]:
@@ -175,12 +188,12 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
     events_may_be_truncated = events_count >= 1000 or events_count == 0
 
     # Build mapping from step_number to list of step_ids from raw_data.steps
-    # raw_data.steps has: {"id": step_id, "step": step_number, ...}
+    # raw_data.steps has: {"id": step_id, "step_number": step_number, "phase": phase, ...}
     # Multiple raw_data.steps can share the same step_number (implement/verify cycles)
     raw_steps_list = raw_data.get("steps", [])
     step_number_to_ids: dict[int, set[int]] = {}
     for rs in raw_steps_list:
-        step_num = _safe_int(rs.get("step"))
+        step_num = _safe_int(rs.get("step_number"))
         step_id = _safe_int(rs.get("id"))
         if step_num is not None and step_id is not None:
             if step_num not in step_number_to_ids:
