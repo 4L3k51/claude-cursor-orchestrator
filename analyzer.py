@@ -588,13 +588,27 @@ def extract_web_searches(events: list[dict]) -> list[dict]:
                     if isinstance(results, list):
                         for r in results:
                             if isinstance(r, dict):
-                                url = r.get("url", "")
-                                title = r.get("title", "")
-                                if url:
-                                    tool_uses[tool_use_id]["results"].append({
-                                        "url": url,
-                                        "title": title,
-                                    })
+                                # Results may have a content key with list of {url, title}
+                                content = r.get("content")
+                                if isinstance(content, list):
+                                    for item in content:
+                                        if isinstance(item, dict):
+                                            url = item.get("url", "")
+                                            title = item.get("title", "")
+                                            if url:
+                                                tool_uses[tool_use_id]["results"].append({
+                                                    "url": url,
+                                                    "title": title,
+                                                })
+                                else:
+                                    # Fallback: try direct url/title on r
+                                    url = r.get("url", "")
+                                    title = r.get("title", "")
+                                    if url:
+                                        tool_uses[tool_use_id]["results"].append({
+                                            "url": url,
+                                            "title": title,
+                                        })
 
     # Also check usage stats for implicit web_search_requests (server-side searches)
     for e in events:
