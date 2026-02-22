@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import ReactMarkdown from 'react-markdown';
 import { getRun } from '../api';
 import StatusBadge from '../components/StatusBadge';
 import SummaryCard from '../components/SummaryCard';
@@ -12,6 +13,7 @@ const RunDetail = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedStep, setSelectedStep] = useState(null);
+  const [expandedPlans, setExpandedPlans] = useState({});
 
   useEffect(() => {
     const fetchData = async () => {
@@ -129,6 +131,36 @@ const RunDetail = () => {
     return (r.rls_issues || 0) + (r.migration_issues || 0) +
            (r.edge_function_issues || 0) + (r.auth_issues || 0) > 0;
   }, [data]);
+
+  // Extract original plan (step 0) and replan steps
+  const planData = useMemo(() => {
+    if (!data?.steps) return { originalPlan: null, replans: [] };
+
+    // Find step 0 with phase="plan"
+    const step0 = data.steps.find(s => s.step_number === 0 && s.phase?.includes('plan'));
+    const originalPlan = step0?.parsed_result || null;
+
+    // Find all replan_checkpoint steps
+    const replans = data.steps
+      .filter(s => s.phase?.includes('replan_checkpoint') && s.parsed_result)
+      .map(s => ({
+        stepNumber: s.step_number,
+        content: s.parsed_result
+      }));
+
+    return { originalPlan, replans };
+  }, [data]);
+
+  // Helper to get preview (first 4 lines) of plan content
+  const getPreview = (content) => {
+    if (!content) return '';
+    const lines = content.split('\n').filter(l => l.trim());
+    return lines.slice(0, 4).join('\n') + (lines.length > 4 ? '\n...' : '');
+  };
+
+  const togglePlanExpanded = (key) => {
+    setExpandedPlans(prev => ({ ...prev, [key]: !prev[key] }));
+  };
 
   if (loading) {
     return <div className="page loading">Loading run details...</div>;
@@ -250,6 +282,70 @@ const RunDetail = () => {
           </>
         )}
       </div>
+
+      {/* Original Plan Section */}
+      {planData.originalPlan && (
+        <section className="section plan-section">
+          <div className="plan-card">
+            <div
+              className="plan-header"
+              onClick={() => togglePlanExpanded('original')}
+            >
+              <h3 className="plan-title">
+                <span className="plan-toggle">{expandedPlans['original'] ? '▼' : '▶'}</span>
+                Original Plan
+              </h3>
+            </div>
+            <div className={`plan-content ${expandedPlans['original'] ? 'expanded' : 'collapsed'}`}>
+              <div className="markdown-content">
+                <ReactMarkdown>
+                  {expandedPlans['original'] ? planData.originalPlan : getPreview(planData.originalPlan)}
+                </ReactMarkdown>
+              </div>
+              {!expandedPlans['original'] && (
+                <button
+                  className="plan-expand-btn"
+                  onClick={(e) => { e.stopPropagation(); togglePlanExpanded('original'); }}
+                >
+                  Show full plan
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Replan sections */}
+          {planData.replans.map((replan, idx) => (
+            <div key={idx} className="plan-card replan-card">
+              <div
+                className="plan-header"
+                onClick={() => togglePlanExpanded(`replan-${replan.stepNumber}`)}
+              >
+                <h3 className="plan-title">
+                  <span className="plan-toggle">
+                    {expandedPlans[`replan-${replan.stepNumber}`] ? '▼' : '▶'}
+                  </span>
+                  Replan after Step {replan.stepNumber}
+                </h3>
+              </div>
+              <div className={`plan-content ${expandedPlans[`replan-${replan.stepNumber}`] ? 'expanded' : 'collapsed'}`}>
+                <div className="markdown-content">
+                  <ReactMarkdown>
+                    {expandedPlans[`replan-${replan.stepNumber}`] ? replan.content : getPreview(replan.content)}
+                  </ReactMarkdown>
+                </div>
+                {!expandedPlans[`replan-${replan.stepNumber}`] && (
+                  <button
+                    className="plan-expand-btn"
+                    onClick={(e) => { e.stopPropagation(); togglePlanExpanded(`replan-${replan.stepNumber}`); }}
+                  >
+                    Show full plan
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
 
       {/* Step Timeline */}
       <section className="section">

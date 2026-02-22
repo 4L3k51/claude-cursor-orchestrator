@@ -76,7 +76,8 @@ def init_db() -> None:
                 input_tokens INTEGER DEFAULT 0,
                 output_tokens INTEGER DEFAULT 0,
                 cost_usd REAL DEFAULT 0,
-                has_events BOOLEAN DEFAULT 0
+                has_events BOOLEAN DEFAULT 0,
+                parsed_result TEXT
             )
         """)
 

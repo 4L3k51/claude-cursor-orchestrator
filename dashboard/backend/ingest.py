@@ -296,9 +296,12 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
         # Get raw steps for this step number
         raw_steps_for_step = get_raw_steps_for_step_number(raw_data, step_number)
 
-        # Extract phase and tool from raw steps
+        # Extract phase, tool, and parsed_result from raw steps
         phase = _extract_phase_from_raw_steps(raw_steps_for_step)
         tool = _extract_tool_from_raw_steps(raw_steps_for_step)
+        # For parsed_result, concatenate all results from raw steps (plan, replan, etc.)
+        parsed_results = [s.get("parsed_result") for s in raw_steps_for_step if s.get("parsed_result")]
+        parsed_result = "\n\n---\n\n".join(parsed_results) if parsed_results else None
 
         # Get failures for this step
         step_failures = _get_failures_for_step(failures_details, step_number)
@@ -326,8 +329,8 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
                 classification, classification_confidence,
                 classification_reasoning, classification_evidence,
                 approach_changed, same_file_repeated, error_category_stable,
-                input_tokens, output_tokens, cost_usd, has_events
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                input_tokens, output_tokens, cost_usd, has_events, parsed_result
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             step_id,
             run_id,
@@ -352,7 +355,8 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
             step_outcome.get("input_tokens", 0),
             step_outcome.get("output_tokens", 0),
             step_outcome.get("cost_usd", 0),
-            has_events
+            has_events,
+            parsed_result
         ))
 
     # Insert failures (filter out false positives)
