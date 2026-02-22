@@ -40,6 +40,13 @@ const StepDetailPanel = ({ runId, stepNumber, onClose }) => {
     return `${s}s`;
   };
 
+  const formatTokens = (tokens) => {
+    if (!tokens || tokens === 0) return '-';
+    if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`;
+    if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K`;
+    return tokens.toLocaleString();
+  };
+
   const parseJSON = (str) => {
     if (!str) return null;
     try {
@@ -95,6 +102,22 @@ const StepDetailPanel = ({ runId, stepNumber, onClose }) => {
               <span className="detail-label">Duration</span>
               <span className="detail-value">{formatDuration(step.duration_seconds)}</span>
             </div>
+            {(step.input_tokens > 0 || step.output_tokens > 0) && (
+              <>
+                <div className="detail-item">
+                  <span className="detail-label">Tokens</span>
+                  <span className="detail-value">
+                    {formatTokens(step.input_tokens)} in / {formatTokens(step.output_tokens)} out
+                  </span>
+                </div>
+                {step.cost_usd > 0 && (
+                  <div className="detail-item">
+                    <span className="detail-label">Cost</span>
+                    <span className="detail-value">${step.cost_usd.toFixed(4)}</span>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         </div>
 

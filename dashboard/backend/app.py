@@ -224,6 +224,21 @@ async def get_stats():
             for row in cursor.fetchall()
         ]
 
+        # Token usage stats
+        cursor.execute("""
+            SELECT
+                COALESCE(SUM(total_input_tokens), 0) as total_input,
+                COALESCE(SUM(total_output_tokens), 0) as total_output,
+                COALESCE(SUM(total_cache_read_tokens), 0) as total_cache_read,
+                COALESCE(SUM(total_cost_usd), 0) as total_cost
+            FROM runs
+        """)
+        token_row = cursor.fetchone()
+        total_input_tokens = token_row[0]
+        total_output_tokens = token_row[1]
+        total_cache_read_tokens = token_row[2]
+        total_cost_usd = token_row[3]
+
     return {
         "total_runs": total_runs,
         "completed_runs": completed_runs,
@@ -235,6 +250,10 @@ async def get_stats():
         "classification_counts": classification_counts,
         "top_error_categories": top_error_categories,
         "top_failure_phases": top_failure_phases,
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_cache_read_tokens": total_cache_read_tokens,
+        "total_cost_usd": round(total_cost_usd, 4) if total_cost_usd else 0,
     }
 
 

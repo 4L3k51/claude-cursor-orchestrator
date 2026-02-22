@@ -36,6 +36,11 @@ def init_db() -> None:
                 migration_issues INTEGER DEFAULT 0,
                 edge_function_issues INTEGER DEFAULT 0,
                 auth_issues INTEGER DEFAULT 0,
+                total_input_tokens INTEGER DEFAULT 0,
+                total_output_tokens INTEGER DEFAULT 0,
+                total_cache_read_tokens INTEGER DEFAULT 0,
+                total_cache_creation_tokens INTEGER DEFAULT 0,
+                total_cost_usd REAL DEFAULT 0,
                 ingested_at TEXT,
                 classified_at TEXT
             )
@@ -62,7 +67,10 @@ def init_db() -> None:
                 classification_evidence TEXT,
                 approach_changed BOOLEAN,
                 same_file_repeated BOOLEAN,
-                error_category_stable BOOLEAN
+                error_category_stable BOOLEAN,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cost_usd REAL DEFAULT 0
             )
         """)
 

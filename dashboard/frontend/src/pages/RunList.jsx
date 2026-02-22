@@ -122,6 +122,13 @@ const RunList = () => {
     return str.length > len ? str.slice(0, len) + '...' : str;
   };
 
+  const formatTokens = (tokens) => {
+    if (!tokens || tokens === 0) return '0';
+    if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`;
+    if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K`;
+    return tokens.toLocaleString();
+  };
+
   const formatTools = (run) => {
     const abbrev = (tool) => {
       if (!tool) return '?';
@@ -191,6 +198,18 @@ const RunList = () => {
             <span className="stat-value">{stats.total_retries}</span>
             <span className="stat-label">Total Retries</span>
           </div>
+          {(stats.total_input_tokens > 0 || stats.total_output_tokens > 0) && (
+            <>
+              <div className="stat">
+                <span className="stat-value">{formatTokens(stats.total_input_tokens + stats.total_output_tokens)}</span>
+                <span className="stat-label">Total Tokens</span>
+              </div>
+              <div className="stat">
+                <span className="stat-value">${stats.total_cost_usd?.toFixed(2) || '0.00'}</span>
+                <span className="stat-label">Total Cost</span>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -234,6 +253,8 @@ const RunList = () => {
               <SortHeader field="success_rate">Success</SortHeader>
               <SortHeader field="total_retries">Retries</SortHeader>
               <SortHeader field="duration_minutes">Duration</SortHeader>
+              <SortHeader field="total_input_tokens">Tokens</SortHeader>
+              <SortHeader field="total_cost_usd">Cost</SortHeader>
               <SortHeader field="classifications">Classification</SortHeader>
             </tr>
           </thead>
@@ -257,6 +278,14 @@ const RunList = () => {
                   {run.total_retries ?? 0}
                 </td>
                 <td>{formatDuration(run.duration_minutes)}</td>
+                <td className="tokens-cell">
+                  {(run.total_input_tokens > 0 || run.total_output_tokens > 0)
+                    ? formatTokens((run.total_input_tokens || 0) + (run.total_output_tokens || 0))
+                    : '-'}
+                </td>
+                <td className="cost-cell">
+                  {run.total_cost_usd > 0 ? `$${run.total_cost_usd.toFixed(2)}` : '-'}
+                </td>
                 <td><ClassificationBar classifications={run.classifications} /></td>
               </tr>
             ))}

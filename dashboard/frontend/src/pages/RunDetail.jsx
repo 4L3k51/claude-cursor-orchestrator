@@ -45,6 +45,13 @@ const RunDetail = () => {
     return `${s}s`;
   };
 
+  const formatTokens = (tokens) => {
+    if (!tokens || tokens === 0) return '0';
+    if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(1)}M`;
+    if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K`;
+    return tokens.toLocaleString();
+  };
+
   const parseModelsUsed = (modelsStr) => {
     if (!modelsStr) return [];
     try {
@@ -78,6 +85,13 @@ const RunDetail = () => {
     );
     const hasClassifications = steps.some(s => s.classification);
 
+    // Token usage from run
+    const totalInputTokens = run?.total_input_tokens || 0;
+    const totalOutputTokens = run?.total_output_tokens || 0;
+    const totalCacheReadTokens = run?.total_cache_read_tokens || 0;
+    const totalCost = run?.total_cost_usd || 0;
+    const hasTokenData = totalInputTokens > 0 || totalOutputTokens > 0;
+
     return {
       selfCorrectionRate,
       timeOnDeadEnds,
@@ -85,6 +99,11 @@ const RunDetail = () => {
       architectural: classifications?.architectural || 0,
       implementation: classifications?.implementation || 0,
       cleanPass: classifications?.clean_pass || 0,
+      totalInputTokens,
+      totalOutputTokens,
+      totalCacheReadTokens,
+      totalCost,
+      hasTokenData,
     };
   }, [data]);
 
@@ -206,6 +225,22 @@ const RunDetail = () => {
           accent="gray"
           subtitle={stats.hasClassifications ? 'in architectural failures' : 'awaiting classification'}
         />
+        {stats.hasTokenData && (
+          <>
+            <SummaryCard
+              title="Total Tokens"
+              value={formatTokens(stats.totalInputTokens + stats.totalOutputTokens)}
+              accent="purple"
+              subtitle={`${formatTokens(stats.totalInputTokens)} in / ${formatTokens(stats.totalOutputTokens)} out`}
+            />
+            <SummaryCard
+              title="API Cost"
+              value={`$${stats.totalCost.toFixed(2)}`}
+              accent="purple"
+              subtitle={stats.totalCacheReadTokens > 0 ? `${formatTokens(stats.totalCacheReadTokens)} cache hits` : null}
+            />
+          </>
+        )}
       </div>
 
       {/* Step Timeline */}

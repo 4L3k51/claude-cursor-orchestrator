@@ -22,6 +22,9 @@
   /* Accent */
   --color-accent: #58a6ff;
   --color-accent-hover: #79b8ff;
+
+  /* Token/Cost colors */
+  --color-purple: #a371f7;
 }
 
 * {
@@ -391,6 +394,19 @@ body {
   font-weight: 600;
 }
 
+/* Token and cost cells */
+.tokens-cell {
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--color-purple);
+}
+
+.cost-cell {
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: var(--color-purple);
+}
+
 /* Text utilities */
 .text-muted {
   color: var(--text-muted);
@@ -525,7 +541,7 @@ body {
 /* Summary Cards */
 .summary-cards {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -556,6 +572,10 @@ body {
 
 .summary-card-gray {
   border-left-color: var(--text-muted);
+}
+
+.summary-card-purple {
+  border-left-color: var(--color-purple);
 }
 
 .summary-card-value {

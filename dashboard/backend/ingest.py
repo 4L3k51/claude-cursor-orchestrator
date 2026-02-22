@@ -92,6 +92,7 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
     summary = data.get("summary", {})
     tools_config = data.get("tools_config", {})
     supabase_specific = data.get("supabase_specific", {})
+    token_usage = data.get("token_usage", {})
     raw_data = data.get("raw_data", {})
 
     # Current timestamp for ingestion
@@ -105,8 +106,10 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
             replan_checkpoints, replans_triggered, success_rate,
             planner, implementer, verifier, models_used,
             rls_issues, migration_issues, edge_function_issues, auth_issues,
+            total_input_tokens, total_output_tokens, total_cache_read_tokens,
+            total_cache_creation_tokens, total_cost_usd,
             ingested_at, classified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         run_id,
         data.get("generated_at"),
@@ -128,6 +131,11 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
         supabase_specific.get("migration_issues", 0),
         supabase_specific.get("edge_function_issues", 0),
         supabase_specific.get("auth_issues", 0),
+        token_usage.get("total_input_tokens", 0),
+        token_usage.get("total_output_tokens", 0),
+        token_usage.get("total_cache_read_tokens", 0),
+        token_usage.get("total_cache_creation_tokens", 0),
+        token_usage.get("total_cost_usd", 0),
         ingested_at,
         None  # classified_at
     ))
@@ -170,8 +178,9 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
                 resolution_actions, error_categories, errors_summary,
                 classification, classification_confidence,
                 classification_reasoning, classification_evidence,
-                approach_changed, same_file_repeated, error_category_stable
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                approach_changed, same_file_repeated, error_category_stable,
+                input_tokens, output_tokens, cost_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             step_id,
             run_id,
@@ -192,7 +201,10 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
             None,  # classification_evidence
             None,  # approach_changed
             None,  # same_file_repeated
-            None   # error_category_stable
+            None,  # error_category_stable
+            step_outcome.get("input_tokens", 0),
+            step_outcome.get("output_tokens", 0),
+            step_outcome.get("cost_usd", 0)
         ))
 
     # Insert failures
