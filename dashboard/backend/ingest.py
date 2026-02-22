@@ -168,10 +168,16 @@ def _extract_web_searches_from_events(events: list[dict]) -> list[dict]:
 
     Results are in event_type="user" events, inside
     event_data.message.content[] as items with type="tool_result".
-    Match results to queries using tool_use_id.
+
+    tool_use_result is matched by query (not tool_use_id) because:
+    - assistant tool_use has IDs like toolu_xxx
+    - tool_use_result doesn't have tool_use_id at top level
+    - tool_use_result.query matches the original input.query
     """
-    # First pass: collect all WebSearch tool_use blocks with their IDs
+    # First pass: collect all WebSearch tool_use blocks
+    # Key by tool_id for tool_result matching, also build query->tool_id map
     tool_uses = {}  # tool_use_id -> {step_id, query, timestamp, results, full_text_result}
+    query_to_tool_id = {}  # query -> tool_use_id (for matching tool_use_result by query)
 
     for e in events:
         event_data = e.get("event_data", {})
@@ -200,6 +206,7 @@ def _extract_web_searches_from_events(events: list[dict]) -> list[dict]:
                                 "results": [],
                                 "full_text_result": None,
                             }
+                            query_to_tool_id[query] = tool_id
 
     # Second pass: match tool_result blocks to tool_use blocks
     for e in events:
@@ -230,12 +237,14 @@ def _extract_web_searches_from_events(events: list[dict]) -> list[dict]:
                             tool_uses[tool_use_id]["full_text_result"] = result_content
 
             # Also check for tool_use_result at event level (structured data)
+            # Match by query instead of tool_use_id (different ID formats)
             tool_use_result = event_data.get("tool_use_result", {})
             if not isinstance(tool_use_result, dict):
                 continue
             if tool_use_result:
-                tool_use_id = tool_use_result.get("tool_use_id")
-                if tool_use_id and tool_use_id in tool_uses:
+                result_query = tool_use_result.get("query", "")
+                matched_tool_id = query_to_tool_id.get(result_query)
+                if matched_tool_id and matched_tool_id in tool_uses:
                     results = tool_use_result.get("results", [])
                     if isinstance(results, list):
                         for r in results:
@@ -248,7 +257,7 @@ def _extract_web_searches_from_events(events: list[dict]) -> list[dict]:
                                             url = item.get("url", "")
                                             title = item.get("title", "")
                                             if url:
-                                                tool_uses[tool_use_id]["results"].append({
+                                                tool_uses[matched_tool_id]["results"].append({
                                                     "url": url,
                                                     "title": title,
                                                 })
@@ -257,7 +266,7 @@ def _extract_web_searches_from_events(events: list[dict]) -> list[dict]:
                                     url = r.get("url", "")
                                     title = r.get("title", "")
                                     if url:
-                                        tool_uses[tool_use_id]["results"].append({
+                                        tool_uses[matched_tool_id]["results"].append({
                                             "url": url,
                                             "title": title,
                                         })
