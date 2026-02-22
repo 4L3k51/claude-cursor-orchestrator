@@ -427,6 +427,16 @@ body {
   border: 1px solid var(--color-failed);
   border-radius: 6px;
   color: var(--color-failed);
+}
+
+.warning-banner {
+  padding: 10px 14px;
+  background-color: rgba(210, 153, 34, 0.1);
+  border: 1px solid var(--color-partial);
+  border-radius: 6px;
+  color: var(--color-partial);
+  font-size: 13px;
+  margin-top: 12px;
   margin-bottom: 20px;
 }
 
@@ -704,6 +714,11 @@ body {
 .verdict-skip, .verdict-unknown {
   background-color: rgba(139, 148, 158, 0.2);
   color: var(--text-secondary);
+}
+
+.verdict-test {
+  background-color: rgba(88, 166, 255, 0.2);
+  color: var(--color-accent);
 }
 
 .retry-badge {

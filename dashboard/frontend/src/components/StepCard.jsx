@@ -16,6 +16,19 @@ const StepCard = ({ step, isSelected, onClick }) => {
 
   const getVerdictBadge = () => {
     const verdict = step.final_verdict?.toUpperCase();
+    const phase = step.phase?.toLowerCase() || '';
+
+    // Runtime test phases don't go through normal verdict flow
+    const runtimeTestPhases = [
+      'smoke_test',
+      'browser_test',
+      'browser_test_gen',
+      'browser_test_fix',
+      'browser_test_fix_verify',
+      'rls_test',
+      'api_verify',
+    ];
+
     switch (verdict) {
       case 'PROCEED':
         return <span className="verdict-badge verdict-proceed">PROCEED</span>;
@@ -24,6 +37,10 @@ const StepCard = ({ step, isSelected, onClick }) => {
       case 'SKIP':
         return <span className="verdict-badge verdict-skip">SKIP</span>;
       default:
+        // Check if this is a runtime test phase
+        if (runtimeTestPhases.some(p => phase.includes(p))) {
+          return <span className="verdict-badge verdict-test">Runtime Test</span>;
+        }
         return <span className="verdict-badge verdict-unknown">{verdict || 'UNKNOWN'}</span>;
     }
   };

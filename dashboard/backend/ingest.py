@@ -67,9 +67,49 @@ def _extract_tool_from_raw_steps(raw_steps: list[dict]) -> Optional[str]:
     return tool_counts.most_common(1)[0][0] if tool_counts else None
 
 
+def _is_false_positive_failure(failure: dict) -> bool:
+    """
+    Check if a failure entry is actually a false positive (success mistakenly labeled as failure).
+
+    The analyzer sometimes includes success messages in failures.details.
+    Filter out entries that are clearly not failures.
+    """
+    error = (failure.get("error") or "").strip().lower()
+    category = (failure.get("category") or "").strip().lower()
+    exit_code = failure.get("exit_code")
+
+    # Success indicators that should not be in failures
+    success_indicators = [
+        "step is complete",
+        "status: pass",
+        "status: proceed",
+        "successfully",
+        "completed successfully",
+        "all tests passed",
+        "build successful",
+    ]
+
+    # If exit_code is 0 and category is "other", check for success indicators
+    if exit_code == 0 or exit_code is None:
+        if category == "other" or not category:
+            for indicator in success_indicators:
+                if indicator in error:
+                    return True
+
+    # If error message is very short and looks like a pass
+    if len(error) < 50 and any(word in error for word in ["pass", "complete", "success", "proceed"]):
+        if "fail" not in error and "error" not in error:
+            return True
+
+    return False
+
+
 def _get_failures_for_step(failures_details: list[dict], step_number: int) -> list[dict]:
-    """Get all failure details for a specific step number."""
-    return [f for f in failures_details if f.get("step") == step_number]
+    """Get all failure details for a specific step number, filtering out false positives."""
+    return [
+        f for f in failures_details
+        if f.get("step") == step_number and not _is_false_positive_failure(f)
+    ]
 
 
 def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
@@ -95,6 +135,12 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
     token_usage = data.get("token_usage", {})
     raw_data = data.get("raw_data", {})
 
+    # Check events count and potential truncation
+    events = raw_data.get("events", [])
+    events_count = len(events)
+    # Flag if events might be truncated (1000 is a common API limit)
+    events_may_be_truncated = events_count >= 1000 or events_count == 0
+
     # Current timestamp for ingestion
     ingested_at = datetime.now(timezone.utc).isoformat()
 
@@ -108,8 +154,9 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
             rls_issues, migration_issues, edge_function_issues, auth_issues,
             total_input_tokens, total_output_tokens, total_cache_read_tokens,
             total_cache_creation_tokens, total_cost_usd,
+            events_count, events_may_be_truncated,
             ingested_at, classified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         run_id,
         data.get("generated_at"),
@@ -136,6 +183,8 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
         token_usage.get("total_cache_read_tokens", 0),
         token_usage.get("total_cache_creation_tokens", 0),
         token_usage.get("total_cost_usd", 0),
+        events_count,
+        events_may_be_truncated,
         ingested_at,
         None  # classified_at
     ))
@@ -207,8 +256,11 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
             step_outcome.get("cost_usd", 0)
         ))
 
-    # Insert failures
+    # Insert failures (filter out false positives)
     for failure in failures_details:
+        if _is_false_positive_failure(failure):
+            continue  # Skip false positive failures
+
         cursor.execute("""
             INSERT INTO failures (
                 run_id, step_number, build_phase, phase, category, error, exit_code

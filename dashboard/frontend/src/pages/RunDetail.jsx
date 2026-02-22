@@ -190,6 +190,11 @@ const RunDetail = () => {
             <strong>Models:</strong> {modelsUsed.join(', ')}
           </div>
         )}
+        {run.events_may_be_truncated && (
+          <div className="warning-banner">
+            ⚠️ Event data may be incomplete ({run.events_count === 0 ? 'no events captured' : `${run.events_count} events, possible truncation`})
+          </div>
+        )}
       </header>
 
       {/* Summary Cards */}

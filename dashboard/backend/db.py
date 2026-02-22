@@ -41,6 +41,8 @@ def init_db() -> None:
                 total_cache_read_tokens INTEGER DEFAULT 0,
                 total_cache_creation_tokens INTEGER DEFAULT 0,
                 total_cost_usd REAL DEFAULT 0,
+                events_count INTEGER DEFAULT 0,
+                events_may_be_truncated BOOLEAN DEFAULT 0,
                 ingested_at TEXT,
                 classified_at TEXT
             )
