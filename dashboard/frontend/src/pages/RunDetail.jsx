@@ -65,7 +65,7 @@ const RunDetail = () => {
   const stats = useMemo(() => {
     if (!data) return null;
 
-    const { steps, classifications } = data;
+    const { run, steps, classifications } = data;
 
     // Self-correction rate: steps with retries > 0 AND verdict PROCEED / total steps with retries
     const stepsWithRetries = steps.filter(s => s.retries > 0);
