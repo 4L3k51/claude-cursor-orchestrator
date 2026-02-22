@@ -98,10 +98,12 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS web_searches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT REFERENCES runs(run_id),
-                step_id TEXT,
+                step_id INTEGER,
                 query TEXT,
                 count INTEGER,
-                timestamp TEXT
+                timestamp TEXT,
+                results TEXT,
+                result_text TEXT
             )
         """)
 

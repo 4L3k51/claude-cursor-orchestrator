@@ -14,6 +14,7 @@ const RunDetail = () => {
   const [error, setError] = useState(null);
   const [selectedStep, setSelectedStep] = useState(null);
   const [expandedPlans, setExpandedPlans] = useState({});
+  const [expandedSearches, setExpandedSearches] = useState({});
 
   useEffect(() => {
     const fetchData = async () => {
@@ -184,8 +185,21 @@ const RunDetail = () => {
     );
   }
 
-  const { run, steps, failures } = data;
+  const { run, steps, failures, web_searches } = data;
   const modelsUsed = parseModelsUsed(run.models_used);
+
+  const toggleSearchExpanded = (idx) => {
+    setExpandedSearches(prev => ({ ...prev, [idx]: !prev[idx] }));
+  };
+
+  const parseResults = (resultsStr) => {
+    if (!resultsStr) return [];
+    try {
+      return JSON.parse(resultsStr);
+    } catch {
+      return [];
+    }
+  };
 
   return (
     <div className="run-detail-page">
@@ -398,6 +412,65 @@ const RunDetail = () => {
               ))}
             </tbody>
           </table>
+        </section>
+      )}
+
+      {/* Web Searches */}
+      {web_searches && web_searches.length > 0 && (
+        <section className="section">
+          <h2 className="section-title">Web Searches ({web_searches.length})</h2>
+          <div className="web-searches-list">
+            {web_searches.map((ws, idx) => {
+              const results = parseResults(ws.results);
+              const isExpanded = expandedSearches[idx];
+              return (
+                <div key={idx} className="search-card">
+                  <div
+                    className="search-header"
+                    onClick={() => toggleSearchExpanded(idx)}
+                  >
+                    <span className="search-toggle">{isExpanded ? '▼' : '▶'}</span>
+                    <span className="search-step">Step {ws.step_id}</span>
+                    <span className="search-query">"{ws.query}"</span>
+                    {results.length > 0 && (
+                      <span className="search-result-count">{results.length} results</span>
+                    )}
+                  </div>
+                  {isExpanded && (
+                    <div className="search-content">
+                      {results.length > 0 && (
+                        <div className="search-results">
+                          <h4>Search Results</h4>
+                          <ul className="result-links">
+                            {results.map((r, i) => (
+                              <li key={i}>
+                                <a href={r.url} target="_blank" rel="noopener noreferrer">
+                                  {r.title || r.url}
+                                </a>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {ws.result_text && (
+                        <div className="search-full-text">
+                          <h4>Full Response</h4>
+                          <div className="result-text-container">
+                            <pre>{ws.result_text}</pre>
+                          </div>
+                        </div>
+                      )}
+                      {!results.length && !ws.result_text && (
+                        <div className="search-no-results">
+                          No detailed results available
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </section>
       )}
 

@@ -158,6 +158,121 @@ def _get_failures_for_step(failures_details: list[dict], step_number: int) -> li
     ]
 
 
+def _extract_web_searches_from_events(events: list[dict]) -> list[dict]:
+    """
+    Extract web search queries and results from raw_data.events.
+
+    WebSearch tool invocations are in event_type="assistant" events,
+    inside event_data.message.content[] as items with type="tool_use"
+    and name="WebSearch". The query is in input.query.
+
+    Results are in event_type="user" events, inside
+    event_data.message.content[] as items with type="tool_result".
+    Match results to queries using tool_use_id.
+    """
+    # First pass: collect all WebSearch tool_use blocks with their IDs
+    tool_uses = {}  # tool_use_id -> {step_id, query, timestamp, results, full_text_result}
+
+    for e in events:
+        event_data = e.get("event_data", {})
+        if isinstance(event_data, str):
+            try:
+                event_data = json.loads(event_data)
+            except:
+                continue
+
+        # Look for WebSearch in assistant events
+        if e.get("event_type") == "assistant":
+            message = event_data.get("message", {})
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for item in content:
+                    if (isinstance(item, dict) and
+                        item.get("type") == "tool_use" and
+                        item.get("name") == "WebSearch"):
+                        tool_id = item.get("id")
+                        query = item.get("input", {}).get("query", "")
+                        if tool_id and query:
+                            tool_uses[tool_id] = {
+                                "step_id": e.get("step_id"),
+                                "query": query,
+                                "timestamp": e.get("timestamp"),
+                                "results": [],
+                                "full_text_result": None,
+                            }
+
+    # Second pass: match tool_result blocks to tool_use blocks
+    for e in events:
+        event_data = e.get("event_data", {})
+        if isinstance(event_data, str):
+            try:
+                event_data = json.loads(event_data)
+            except:
+                continue
+
+        # Look for tool_result in user events
+        if e.get("event_type") == "user":
+            message = event_data.get("message", {})
+            content = message.get("content", [])
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "tool_result":
+                        tool_use_id = item.get("tool_use_id")
+                        if tool_use_id and tool_use_id in tool_uses:
+                            # Get the full text result
+                            result_content = item.get("content", "")
+                            if isinstance(result_content, list):
+                                # Content might be a list of text blocks
+                                result_content = "\n".join(
+                                    c.get("text", str(c)) if isinstance(c, dict) else str(c)
+                                    for c in result_content
+                                )
+                            tool_uses[tool_use_id]["full_text_result"] = result_content
+
+            # Also check for tool_use_result at event level (structured data)
+            tool_use_result = event_data.get("tool_use_result", {})
+            if tool_use_result:
+                tool_use_id = tool_use_result.get("tool_use_id")
+                if tool_use_id and tool_use_id in tool_uses:
+                    results = tool_use_result.get("results", [])
+                    if isinstance(results, list):
+                        for r in results:
+                            if isinstance(r, dict):
+                                url = r.get("url", "")
+                                title = r.get("title", "")
+                                if url:
+                                    tool_uses[tool_use_id]["results"].append({
+                                        "url": url,
+                                        "title": title,
+                                    })
+
+    # Also check usage stats for implicit web_search_requests (server-side searches)
+    for e in events:
+        event_data = e.get("event_data", {})
+        if isinstance(event_data, str):
+            try:
+                event_data = json.loads(event_data)
+            except:
+                continue
+
+        if e.get("event_type") == "result":
+            usage = event_data.get("usage", {})
+            server_tool_use = usage.get("server_tool_use", {})
+            web_requests = server_tool_use.get("web_search_requests", 0)
+            if web_requests > 0:
+                # Create a synthetic entry for implicit searches
+                tool_uses[f"implicit_{e.get('step_id')}_{e.get('timestamp')}"] = {
+                    "step_id": e.get("step_id"),
+                    "query": "(implicit web search)",
+                    "timestamp": e.get("timestamp"),
+                    "results": [],
+                    "full_text_result": None,
+                    "count": web_requests,
+                }
+
+    return list(tool_uses.values())
+
+
 def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
     """
     Ingest a single report file.
@@ -378,19 +493,23 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
             failure.get("exit_code")
         ))
 
-    # Insert web searches
-    web_searches = data.get("web_searches", [])
+    # Extract web searches directly from raw_data.events
+    # (don't rely on top-level web_searches which may be empty in old reports)
+    web_searches = _extract_web_searches_from_events(events)
     for ws in web_searches:
+        results_json = json.dumps(ws.get("results", [])) if ws.get("results") else None
         cursor.execute("""
             INSERT INTO web_searches (
-                run_id, step_id, query, count, timestamp
-            ) VALUES (?, ?, ?, ?, ?)
+                run_id, step_id, query, count, timestamp, results, result_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (
             run_id,
             ws.get("step_id"),
             ws.get("query"),
             ws.get("count"),
-            ws.get("timestamp")
+            ws.get("timestamp"),
+            results_json,
+            ws.get("full_text_result")
         ))
 
     return run_id

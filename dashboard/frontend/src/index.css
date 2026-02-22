@@ -1820,3 +1820,125 @@ body {
   background-color: var(--bg-tertiary);
   border-color: var(--color-accent);
 }
+
+/* ===== Web Searches Section ===== */
+.web-searches-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.search-card {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.search-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  cursor: pointer;
+  background-color: var(--bg-tertiary);
+  transition: background-color 0.15s;
+}
+
+.search-header:hover {
+  background-color: #2d333b;
+}
+
+.search-toggle {
+  font-size: 10px;
+  color: var(--text-secondary);
+  width: 12px;
+}
+
+.search-step {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background-color: var(--bg-primary);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.search-query {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-style: italic;
+}
+
+.search-result-count {
+  font-size: 12px;
+  color: var(--color-accent);
+  background-color: rgba(88, 166, 255, 0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.search-content {
+  padding: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.search-results h4,
+.search-full-text h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.result-links {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 16px 0;
+}
+
+.result-links li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.result-links li:last-child {
+  border-bottom: none;
+}
+
+.result-links a {
+  color: var(--color-accent);
+  text-decoration: none;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.result-links a:hover {
+  text-decoration: underline;
+}
+
+.result-text-container {
+  max-height: 300px;
+  overflow-y: auto;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.result-text-container pre {
+  margin: 0;
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-primary);
+}
+
+.search-no-results {
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
