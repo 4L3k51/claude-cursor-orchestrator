@@ -141,26 +141,41 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
     # Flag if events might be truncated (1000 is a common API limit)
     events_may_be_truncated = events_count >= 1000 or events_count == 0
 
-    # Calculate which steps have events by checking step_id in events
-    step_outcomes = data.get("step_outcomes", [])
-    steps_with_event_data = set()
+    # Build mapping from step_number to list of step_ids from raw_data.steps
+    # raw_data.steps has: {"id": step_id, "step": step_number, ...}
+    # Multiple raw_data.steps can share the same step_number (implement/verify cycles)
+    raw_steps = raw_data.get("steps", [])
+    step_number_to_ids: dict[int, set[int]] = {}
+    for rs in raw_steps:
+        step_num = rs.get("step")
+        step_id = rs.get("id")
+        if step_num is not None and step_id is not None:
+            if step_num not in step_number_to_ids:
+                step_number_to_ids[step_num] = set()
+            step_number_to_ids[step_num].add(step_id)
+
+    # Collect step_ids that have events
+    step_ids_with_events = set()
     for e in events:
-        # Events have step_id field that links to steps
         step_id = e.get("step_id")
-        if step_id:
-            steps_with_event_data.add(step_id)
+        if step_id is not None:
+            step_ids_with_events.add(step_id)
+
+    # For each step_outcome (by step_number), check if ANY of its step_ids have events
+    step_outcomes = data.get("step_outcomes", [])
+    step_number_has_events: dict[int, bool] = {}
+    for step_outcome in step_outcomes:
+        step_number = step_outcome.get("step")
+        # Get all step_ids for this step_number
+        ids_for_step = step_number_to_ids.get(step_number, set())
+        # Check if any of these ids have events
+        has_events = bool(ids_for_step & step_ids_with_events)
+        step_number_has_events[step_number] = has_events
 
     # Count steps with/without events
     total_steps = len(step_outcomes)
-    steps_with_events = 0
-    steps_without_events = 0
-    for step_outcome in step_outcomes:
-        step_number = step_outcome.get("step")
-        step_id = step_number  # step_id in events is the step number
-        if step_id in steps_with_event_data:
-            steps_with_events += 1
-        else:
-            steps_without_events += 1
+    steps_with_events = sum(1 for has in step_number_has_events.values() if has)
+    steps_without_events = total_steps - steps_with_events
 
     # Build event coverage string
     if total_steps > 0:
@@ -250,8 +265,8 @@ def _ingest_single_report(conn: sqlite3.Connection, report_path: Path) -> str:
         resolution_actions = step_outcome.get("resolution_actions")
         resolution_actions_json = json.dumps(resolution_actions) if resolution_actions else None
 
-        # Check if this step has event data
-        has_events = step_number in steps_with_event_data
+        # Check if this step has event data (using pre-computed mapping)
+        has_events = step_number_has_events.get(step_number, False)
 
         cursor.execute("""
             INSERT INTO steps (
